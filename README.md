@@ -1,12 +1,13 @@
 # Machine-Learning-Final-Project
 
-ST443: Group Project
+##ST443: Group Project
 
-1 Task 1: multiclass classification
+##Task 1: multiclass classification
+
 The first part of this project involves applying statistical machine learning techniques to
 a multiclass classification problem, using the dataset provided on Moodle as a compressed
 CSV file, data-1.csv.gz.
-1.1 Data description
+###1.1 Data description
 In the first task, you will work with hyperspectral data. This satellite image data comprises
 calibrated surface-reflectance measurements for each pixel across many narrow, contiguous
 spectral bands spanning the visible to short-wave infrared (approximately 420 − 2450 nm).
@@ -25,10 +26,10 @@ read.csv("data-1.csv.gz"). Given the computational load imposed by the large dat
 you may have to train your model on a subset of the data or adopt an alternative approach,
 including methods not covered in the course.
 1The raw satellite data can be accessed at: https://www.enmap.org/data_tools/exampledata/
-1.2 Task
+###1.2 Task
 This task consists of the following sub-tasks:
-T1.1 Explore the data to generate summary statistics and plots that help the reader understand the data, with a focus on information relevant to the classification task.
-T1.2 Train and evaluate the following classifiers (covered in the course):
+- T1.1 Explore the data to generate summary statistics and plots that help the reader understand the data, with a focus on information relevant to the classification task.
+- T1.2 Train and evaluate the following classifiers (covered in the course):
 • Linear Discriminant Analysis (LDA)
 • Logistic classifier
 • Quadratic Discriminant Analysis (QDA)
@@ -37,8 +38,8 @@ T1.2 Train and evaluate the following classifiers (covered in the course):
 • Random Forest
 • Support Vector Machine (SVM)
 Additionally, train and evaluate these classifiers using PCA with 10 components.
-T1.3 Summarise the classification performance of T1.2 with appropriate summaries or visualisations.
-T1.4 In glaciology and climate research, an important task is monitoring glacier extent over
+- T1.3 Summarise the classification performance of T1.2 with appropriate summaries or visualisations.
+- T1.4 In glaciology and climate research, an important task is monitoring glacier extent over
 time. Using the provided hyperspectral satellite data, frame glacier-ice detection as a
 binary task with glacier ice = positive and all other land types = negative. Choose
 and justify an evaluation metric appropriate for this setting (e.g. F1 with glacier as
@@ -47,11 +48,11 @@ improving your chosen performance metric. You may use any classifier or combinat
 of methods covered in the course, including those listed in T1.2, as well as methods
 like bagging, boosting, and regularisation.
 
-2 Task 2: feature selection
+##Task 2: feature selection
 The second part of the project focuses on achieving high classification accuracy using a
 minimal number of features. You will use the dataset provided on Moodle as a compressed
 CSV file: data-2.csv.gz.
-2.1 Data description
+###2.1 Data description
 The dataset contains high-dimensional neural activity recordings from the mouse frontal
 cortex during a multisensory decision-making task. In this task, mice were trained to respond to visual and auditory cues presented simultaneously, using these sensory inputs to
 decide whether to turn a wheel to the left or right to obtain a reward. The dataset consists
@@ -69,19 +70,17 @@ the pattern unit i bin t, where i is the neuron index and t is the time bin inde
 were accessed through the IBL’s ONE API (Alyx team and International Brain Laboratory,
 2020). Due to the large feature dimensionality, it is recommended to read the compressed file
 directly into R or Python, for example, by using the command read.csv("data-2.csv.gz").
-2.2 Task
+##2.2 Task
 This task consists of the following sub-tasks:
-T2.1 Explore the data to generate summary statistics and plots that help the reader understand the data, with a focus on information relevant to the classification task.
-T2.2 Train and evaluate feature selection methods with the goal of achieving high balanced
+- T2.1 Explore the data to generate summary statistics and plots that help the reader understand the data, with a focus on information relevant to the classification task.
+- T2.2 Train and evaluate feature selection methods with the goal of achieving high balanced
 accuracy using a minimal number of selected features. Use three different approaches
 of your choice that were covered in the course.
-T2.3 Train and evaluate up to three additional feature selection methods, other than those
+- T2.3 Train and evaluate up to three additional feature selection methods, other than those
 in T2.2, which may include methods not covered in the course, with the goal of
 achieving high balanced accuracy using a minimal number of selected features. Provide
 an explanation of each new method.
-For T2.2 and T2.3, your evaluation results should include the balanced accuracy
+- For T2.2 and T2.3, your evaluation results should include the balanced accuracy
 and the number of selected features achieved by each method for various numbers of
 selected features. You may also compare the balanced accuracy achieved by different
-methods for a similar number of selected features.
-3 Submission and assessment
-Each group needs to submit one written report and two notebooks (one for each task).
+methods for a similar number of selected features. S
