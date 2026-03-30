@@ -1,13 +1,13 @@
 # Machine-Learning-Final-Project
 
-##ST443: Group Project
+## ST443: Group Project
 
-##Task 1: multiclass classification
+## Task 1: multiclass classification
 
 The first part of this project involves applying statistical machine learning techniques to
 a multiclass classification problem, using the dataset provided on Moodle as a compressed
 CSV file, data-1.csv.gz.
-###1.1 Data description
+### 1.1 Data description
 In the first task, you will work with hyperspectral data. This satellite image data comprises
 calibrated surface-reflectance measurements for each pixel across many narrow, contiguous
 spectral bands spanning the visible to short-wave infrared (approximately 420 − 2450 nm).
@@ -26,7 +26,7 @@ read.csv("data-1.csv.gz"). Given the computational load imposed by the large dat
 you may have to train your model on a subset of the data or adopt an alternative approach,
 including methods not covered in the course.
 1The raw satellite data can be accessed at: https://www.enmap.org/data_tools/exampledata/
-###1.2 Task
+### 1.2 Task
 This task consists of the following sub-tasks:
 - T1.1 Explore the data to generate summary statistics and plots that help the reader understand the data, with a focus on information relevant to the classification task.
 - T1.2 Train and evaluate the following classifiers (covered in the course):
@@ -48,11 +48,11 @@ improving your chosen performance metric. You may use any classifier or combinat
 of methods covered in the course, including those listed in T1.2, as well as methods
 like bagging, boosting, and regularisation.
 
-##Task 2: feature selection
+## Task 2: feature selection
 The second part of the project focuses on achieving high classification accuracy using a
 minimal number of features. You will use the dataset provided on Moodle as a compressed
 CSV file: data-2.csv.gz.
-###2.1 Data description
+### 2.1 Data description
 The dataset contains high-dimensional neural activity recordings from the mouse frontal
 cortex during a multisensory decision-making task. In this task, mice were trained to respond to visual and auditory cues presented simultaneously, using these sensory inputs to
 decide whether to turn a wheel to the left or right to obtain a reward. The dataset consists
