@@ -1,0 +1,1258 @@
+---
+title: "part1.2reorganised"
+author: "Jaey Tay"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r libraries}
+# Load Libraries
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+library(caret)
+library(MASS)
+library(randomForest)
+library(pROC)
+library(xtable)
+library(glmnet)
+library(gridExtra)
+library(corrplot)
+library(reshape2)
+library(scales)
+
+
+# Fix namespace conflicts
+select <- dplyr::select
+filter <- dplyr::filter
+```
+
+# Task 1.1
+
+```{r data import}
+# Set seed for reproducibility
+set.seed(1)
+
+# Import data
+data <- read.csv("data-1.csv.gz")
+cat("Data loaded:", nrow(data), "rows x", ncol(data), "columns\n")
+```
+
+
+```{r data-structure}
+# Check structure
+str(data, list.len = 10)
+capture.output(str(data, list.len = 10))
+
+# View first few rows
+head(data[, 1:10])
+
+missing_counts <- colSums(is.na(data))
+cat("Total NA values:", sum(missing_counts))
+```
+The dataset has 215604 observations, and 220 spectral bands, which differs from the project description of 218680 observations and 218 spectral bands. The observations correspond to the reflective index of each particular band. No NA values are observed. 
+
+```{r summary-stats}
+# Class distribution
+cat("Class distribution:")
+class_dist <- table(data$land_type)
+print(class_dist)
+
+# Class proportions
+cat("Class proportions:")
+prop.table(class_dist) %>% round(3)
+capture.output(prop.table(class_dist) %>% round(3))
+
+library(knitr)
+
+# Create a data frame with counts and proportions
+class_summary <- data.frame(
+  Class = names(class_dist),
+  Count = as.vector(class_dist),
+  Proportion = round(prop.table(class_dist), 3)
+)
+
+kable(class_summary, format = "latex", booktabs = TRUE)
+```
+
+```{r class-distribution, fig.height=5}
+# Bar plot of class distribution
+ggplot(data, aes(x = reorder(land_type, land_type, function(x) -length(x)))) +
+  geom_bar(fill = "steelblue", alpha = 0.8) +
+  geom_text(stat = 'count', aes(label = after_stat(count)), 
+            vjust = -0.5, size = 3.5) +
+  labs(title = "Distribution of Land Types",
+       x = "Land Type",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# Check for class imbalance
+cat("Class imbalance ratio (max/min):", 
+    max(class_dist) / min(class_dist))
+```
+There are 8 distinct land types. The most prevalent land type are alpine meadows, making up 23.5% of the land area. On the other hand, dark rock is the least common land type, making up 4.70% of the land area. This would lead, to a certain extent, to some class imbalance, with there being a class imbalance factor of 5. We also observe that the proportion of snow/ice is 5.3%. This may present a problem for the subsequent glacier prediction task (1.4) as it becomes a very imbalanced binary problem. 
+
+```{r spatial-distribution, fig.height=8}
+# Create spatial visualization of land types
+ggplot(data, aes(x = p_x, y = p_y, color = land_type)) +
+  geom_point(size = 0.5, alpha = 0.6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(title = "Spatial Distribution of Land Types",
+       x = "X Coordinate",
+       y = "Y Coordinate",
+       color = "Land Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "right",
+        legend.text = element_text(size = 8),
+        legend.title = element_text(face = "bold"),
+        legend.key.size = unit(1.2, "lines")) +
+  coord_equal() +
+  guides(color = guide_legend(override.aes = list(size = 5, alpha = 1)))
+```
+Here, we plot a map of our dataset, based on the x and y coordinates which were given. This serves as a useful cursory check for our data points. When observed beside the provided map of the area, we see that our map resembles the actual image of the region. 
+
+
+```{r glacier-binary, fig.height=8, fig.width=10}
+# Highlight glacier/snow regions for T1.4
+data_glacier <- data %>%
+  mutate(is_glacier = ifelse(land_type == "snow / ice", "Glacier/Snow", "Other"))
+
+ggplot(data_glacier, aes(x = p_x, y = p_y, color = is_glacier)) +
+  geom_point(size = 0.3, alpha = 0.6) +
+  scale_color_manual(values = c("Glacier/Snow" = "#00D9FF", "Other" = "gray70")) +
+  scale_y_reverse() +
+  labs(title = "Glacier Ice Detection Task (T1.4): Binary Classification",
+       subtitle = "Snow/ice (5.3%) vs. all other land types (94.7%)",
+       x = "X Coordinate (pixels)",
+       y = "Y Coordinate (pixels)",
+       color = "Class") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        legend.position = "right",
+        legend.text = element_text(size = 10),
+        legend.title = element_text(face = "bold")) +
+  coord_equal() +
+  guides(color = guide_legend(override.aes = list(size = 5, alpha = 1)))
+```
+This visualisation highlights the sparsity of snow/ice land types. The class imbalance (5.3% positive class) suggests that evaluation metrics such as F1-score(?) or balanced accuracy will be more appropriate than overall accuracy, as a naive classifier predicting "non-glacier" for all pixels would achieve 94.7% accuracy while being completely uninformative.
+
+
+```{r spectral-signatures, fig.height=6}
+
+band_cols <- grep("^Band_", names(data), value = TRUE)
+spectral_data <- data[, band_cols]
+# Calculate mean spectral signature for each class
+spectral_means <- data %>%
+  dplyr::select(land_type, all_of(band_cols)) %>%
+  group_by(land_type) %>%
+  summarise(across(everything(), mean)) %>%
+  pivot_longer(cols = -land_type, names_to = "Band", values_to = "Reflectance") %>%
+  mutate(Band_num = as.numeric(gsub("Band_", "", Band)))
+
+# Plot mean spectral signatures
+ggplot(spectral_means, aes(x = Band_num, y = Reflectance, color = land_type)) +
+  geom_line(linewidth = 1, alpha = 0.8) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(title = "Mean Spectral Signatures by Land Type",
+       subtitle = "Average reflectance across wavelength bands (≈ 420-2450 nm)",
+       x = "Band Number",
+       y = "Mean Reflectance",
+       color = "Land Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+
+The mean spectral signatures reveal clear separability between certain land types. Snow and ice exhibit higher reflectance on the lower bands of the spectrum. Land types which feature vegetation (alpine meadow, alpine tundra, valley floor and veg-scree mix) display similar reflective patterns, suggesting these may be more challenging to discriminate. On the other hand, the different kinds of rock exhibit more distinct spectral profiles, suggesting that their reflective features should provide stronger discriminative power for classification.
+
+
+```{r spectral-variability, fig.height=6}
+# Calculate standard deviation for each class
+spectral_sd <- data %>%
+  dplyr::select(land_type, all_of(band_cols)) %>%
+  group_by(land_type) %>%
+  summarise(across(everything(), sd)) %>%
+  pivot_longer(cols = -land_type, names_to = "Band", values_to = "SD") %>%
+  mutate(Band_num = as.numeric(gsub("Band_", "", Band)))
+
+# Plot spectral variability
+ggplot(spectral_sd, aes(x = Band_num, y = SD, color = land_type)) +
+  geom_line(linewidth = 1, alpha = 0.8) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(title = "Spectral Variability by Land Type",
+       subtitle = "Standard deviation of reflectance across wavelength bands",
+       x = "Band Number",
+       y = "Standard Deviation",
+       color = "Land Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+For snow/ice land types, we observe that the standard deviation of reflectivity increases a lot as we approach the lower bands of the spectrum. At lower bands, dark rock and scree/sunlit rock also exhibit higher standard deviation of reflectivity than other land masses. As we get to higher bands, we see that the standard deviation of reflectivity generally remains relatively lower for all land types. 
+
+
+
+
+
+# Task 1.2
+
+```{r data preparation}
+# Clean factor levels for caret compatibility
+data$land_type <- as.factor(data$land_type)
+current_levels <- levels(data$land_type)
+temp_levels <- gsub("/", ".", current_levels, fixed = TRUE)
+temp_levels <- gsub(" ", ".", temp_levels, fixed = TRUE)
+cleaned_levels <- make.names(temp_levels, unique = TRUE)
+levels(data$land_type) <- cleaned_levels
+
+# Create spatial blocks for train/test split
+nx <- 4
+ny <- 4
+
+data <- data %>%
+  mutate(
+    x_block = cut(p_x, breaks = nx, labels = FALSE),
+    y_block = cut(p_y, breaks = ny, labels = FALSE),
+    block_id = paste(x_block, y_block, sep = "_")
+  )
+
+# Split into training and test blocks
+unique_blocks <- unique(data$block_id)
+set.seed(1)
+test_blocks <- sample(unique_blocks, 3)
+remaining_blocks <- setdiff(unique_blocks, test_blocks)
+train_blocks <- sample(remaining_blocks, 9)
+
+train_data <- data %>% filter(block_id %in% train_blocks)
+test_data <- data %>% filter(block_id %in% test_blocks)
+
+cat("\nData Split:\n")
+cat("  Training pixels:", nrow(train_data), "\n")
+cat("  Test pixels:", nrow(test_data), "\n")
+
+# Define CV control (used by all models)
+K_FOLDS <- 5
+set.seed(123)
+folds_index <- createFolds(
+  y = train_data$land_type,
+  k = K_FOLDS,
+  list = TRUE,
+  returnTrain = TRUE
+)
+
+ctrl <- trainControl(
+  method = "cv",
+  number = K_FOLDS,
+  index = folds_index,
+  savePredictions = FALSE,
+  classProbs = TRUE,
+  verboseIter = FALSE
+)
+
+# Extract predictor columns
+pred_cols <- grep("^Band", colnames(train_data), value = TRUE)
+```
+
+```{r model evaluation function}
+evaluate_model <- function(model, test_data, model_name, 
+                          save_latex = FALSE, file_prefix = NULL) {
+  
+  # Predictions
+  preds <- predict(model, test_data)
+  probs <- predict(model, test_data, type = "prob")
+  
+  # Confusion Matrix
+  cm <- confusionMatrix(preds, test_data$land_type)
+  
+  # One-vs-All Metrics
+  classes <- levels(test_data$land_type)
+  ova <- data.frame(
+    Class = classes,
+    Balanced_Acc = numeric(length(classes)),
+    AUC = numeric(length(classes)),
+    F1 = numeric(length(classes))
+  )
+  
+  for (i in seq_along(classes)) {
+    k <- classes[i]
+    binary_truth <- factor(test_data$land_type == k, levels = c(TRUE, FALSE))
+    binary_prob <- probs[, k]
+    binary_pred <- factor(preds == k, levels = c(TRUE, FALSE))
+    
+    cm_ova <- confusionMatrix(binary_pred, binary_truth, positive = "TRUE")
+    ova$Balanced_Acc[i] <- cm_ova$byClass["Balanced Accuracy"]
+    ova$F1[i] <- cm_ova$byClass["F1"]
+    
+    roc_obj <- roc(binary_truth, binary_prob, levels = c(FALSE, TRUE), quiet = TRUE)
+    ova$AUC[i] <- as.numeric(auc(roc_obj))
+  }
+  
+  # Calculate averages
+  avg_bal_acc <- mean(ova$Balanced_Acc, na.rm = TRUE)
+  avg_auc <- mean(ova$AUC, na.rm = TRUE)
+  avg_f1 <- mean(ova$F1, na.rm = TRUE)
+  
+  # Console output
+  cat("\n", rep("=", 60), "\n", sep = "")
+  cat(model_name, "\n")
+  cat(rep("=", 60), "\n\n", sep = "")
+  
+  cat("Confusion Matrix:\n")
+  print(cm$table)
+  cat("\n")
+  
+  cat(sprintf("Overall Accuracy:           %.4f\n", cm$overall["Accuracy"]))
+  cat(sprintf("Misclassification Error:    %.4f\n", 1 - cm$overall["Accuracy"]))
+  cat(sprintf("Avg. Balanced Accuracy:     %.4f\n", avg_bal_acc))
+  cat(sprintf("Avg. AUC:                   %.4f\n", avg_auc))
+  cat(sprintf("Avg. F1 Score:              %.4f\n", avg_f1))
+  cat("\n")
+  
+  # LaTeX output
+  if (save_latex && !is.null(file_prefix)) {
+    summary_metrics <- data.frame(
+      Metric = c("Overall Accuracy", "Misclassification Error", "Avg. Balanced Accuracy", "Avg. AUC", "Avg. F1 Score"),
+      Value = round(c(cm$overall["Accuracy"], 
+                     1 - cm$overall["Accuracy"],
+                     avg_bal_acc, avg_auc, avg_f1), 4)
+    )
+    
+    cat("\n% LaTeX Table for", model_name, "\n")
+    cat(capture.output(print(xtable(summary_metrics,
+                                    caption = paste(model_name, "Performance"),
+                                    label = paste0("tab:", file_prefix)),
+                            include.rownames = FALSE,
+                            booktabs = TRUE)), sep = "\n")
+  }
+  
+  # Return results
+  invisible(list(
+    cm = cm,
+    ova = ova,
+    avg_bal_acc = avg_bal_acc,
+    avg_auc = avg_auc,
+    avg_f1 = avg_f1
+  ))
+}
+```
+
+
+```{r model training}
+# Storage for all results
+all_results <- list()
+
+# Extract predictor columns
+pred_cols <- grep("^Band", colnames(train_data), value = TRUE)
+```
+
+
+```{r LDA model training}
+# LDA - Original Features
+train_lda_orig <- train_data[, c(pred_cols, "land_type")]
+
+cat("\nTraining LDA - Original Features...\n")
+model_lda_orig <- train(
+  land_type ~ .,
+  data = train_lda_orig,
+  method = "lda",
+  trControl = ctrl,
+  metric = "Accuracy"
+)
+all_results$lda_orig <- evaluate_model(
+  model_lda_orig, test_data,
+  "LDA - Original", TRUE, "lda_orig"
+)
+
+# LDA - PCA Features
+train_lda_pca <- train_data[, c(pred_cols, "land_type")]
+
+cat("\nTraining LDA - PCA Features...\n")
+model_lda_pca <- train(
+  land_type ~ .,
+  data = train_lda_pca,
+  method = "lda",
+  preProcess = c("center", "scale", "pca"),
+  preProcOptions = list(pcaComp = 10),
+  trControl = ctrl,
+  metric = "Accuracy"
+)
+all_results$lda_pca <- evaluate_model(
+  model_lda_pca, test_data,
+  "LDA - PCA", TRUE, "lda_pca"
+)
+```
+
+
+```{r logistic model training}
+train_log_orig <- train_data[, c(pred_cols, "land_type")]
+
+ridge_grid_orig <- expand.grid(
+  alpha = 0,
+  lambda = seq(0.001, 1, length = 20)
+)
+
+cat("\nTraining Logistic Regression - Original Features...\n")
+
+model_log_orig <- train(
+  land_type ~ .,
+  data = train_log_orig,
+  method = "glmnet",
+  family = "multinomial",
+  tuneGrid = ridge_grid_orig,
+  trControl = ctrl,
+  metric = "Accuracy"
+)
+
+all_results$log_orig <- evaluate_model(
+  model_log_orig, test_data,
+  "Logistic - Original", TRUE, "log_orig"
+)
+
+
+# Logistic - PCA Features
+cat("\nTraining Logistic Regression - PCA Features...\n")
+
+train_log_pca <- train_data[, c(pred_cols, "land_type")]
+
+ridge_grid_pca <- expand.grid(
+  alpha = 0,
+  lambda = seq(0.001, 0.5, length = 20)
+)
+
+model_log_pca <- train(
+  land_type ~ .,
+  data = train_log_pca,
+  method = "multinom",
+  trace = FALSE,
+  trControl = ctrl,                
+  metric = "Accuracy",
+  preProcess = c("center", "scale", "pca"),
+  preProcOptions = list(pcaComp = 10)
+)
+
+all_results$log_pca <- evaluate_model(
+  model_log_pca, test_data,
+  "Logistic - PCA", TRUE, "log_pca"
+)
+```
+
+
+```{r QDA model training}
+
+# QDA - Original Features
+train_qda_orig <- train_data[, c(pred_cols, "land_type")]
+
+cat("\nTraining QDA - Original Features...\n")
+model_qda_orig <- train(
+  land_type ~ .,
+  data = train_qda_orig,
+  method = "qda",
+  trControl = ctrl,
+  metric = "Accuracy"
+)
+all_results$qda_orig <- evaluate_model(
+  model_qda_orig, test_data,
+  "QDA - Original", TRUE, "qda_orig"
+)
+
+# QDA - PCA Features
+train_qda_pca <- train_data[, c(pred_cols, "land_type")]
+
+cat("\nTraining QDA - PCA Features...\n")
+model_qda_pca <- train(
+  land_type ~ .,
+  data = train_qda_pca,
+  method = "qda",
+  preProcess = c("center", "scale", "pca"),
+  preProcOptions = list(pcaComp = 10),
+  trControl = ctrl,
+  metric = "Accuracy"
+)
+all_results$qda_pca <- evaluate_model(
+  model_qda_pca, test_data,
+  "QDA - PCA", TRUE, "qda_pca"
+)
+```
+
+
+```{r knn model training}
+# k-NN - Original Features (10% sample)
+cat("\nTraining k-NN - Original Features (10% sample)...\n")
+
+set.seed(0)
+knn_sample_idx <- createDataPartition(
+  train_data$land_type,
+  p = 0.10,
+  list = FALSE
+)
+
+train_knn_orig <- train_data[knn_sample_idx, c(pred_cols, "land_type")]
+
+cat("k-NN Training Sample Size:", nrow(train_knn_orig), "\n")
+cat("Original Training Size:", nrow(train_data), "\n")
+
+# Create NEW folds for the sampled data
+knn_folds_orig <- createFolds(
+  y = train_knn_orig$land_type,
+  k = K_FOLDS,
+  list = TRUE,
+  returnTrain = TRUE
+)
+
+ctrl_knn_orig <- trainControl(
+  method = "cv",
+  number = K_FOLDS,
+  index = knn_folds_orig,  # Use folds from sampled data!
+  savePredictions = FALSE,
+  classProbs = TRUE,
+  verboseIter = FALSE
+)
+
+model_knn_orig <- train(
+  land_type ~ .,
+  data = train_knn_orig,
+  method = "knn",
+  tuneGrid = data.frame(k = c(3, 5, 7, 11, 15)),
+  trControl = ctrl_knn_orig,  # Use the sampled-data ctrl
+  metric = "Accuracy"
+)
+
+cat("\nk-NN (Original) Training Complete.\n")
+
+all_results$knn_orig <- evaluate_model(
+  model_knn_orig, test_data,
+  "k-NN - Original (10% sample)", TRUE, "knn_orig"
+)
+
+# k-NN - PCA Features (full data)
+cat("\nTraining k-NN - PCA Features (full data)...\n")
+
+# Manually do PCA preprocessing
+pca_prep_knn <- preProcess(
+  train_data[, pred_cols],
+  method = c("center", "scale", "pca"),
+  pcaComp = 10
+)
+
+# Apply PCA to training data
+train_knn_pca_transformed <- predict(pca_prep_knn, train_data[, pred_cols])
+train_knn_pca <- data.frame(train_knn_pca_transformed, land_type = train_data$land_type)
+
+# Train k-NN on PCA-transformed data
+model_knn_pca <- train(
+  land_type ~ .,
+  data = train_knn_pca,
+  method = "knn",
+  tuneGrid = data.frame(k = c(3, 5, 7, 11, 15, 21)),
+  trControl = ctrl,
+  metric = "Accuracy"
+)
+
+cat("\nk-NN (PCA) Training Complete.\n")
+
+test_knn_pca_transformed <- predict(pca_prep_knn, test_data[, pred_cols])
+test_knn_pca <- data.frame(test_knn_pca_transformed, land_type = test_data$land_type)
+
+all_results$knn_pca <- evaluate_model(
+  model_knn_pca, 
+  test_knn_pca,  # Use transformed test data!
+  "k-NN - PCA", TRUE, "knn_pca")
+```
+
+
+
+```{r gbdt model training}
+# GBDT (XGBoost) - Original Features (10% sample)
+
+cat("\nTraining GBDT - Original Features (10% sample)...\n")
+
+set.seed(0)
+gbdt_sample_idx <- createDataPartition(train_data$land_type, p = 0.10, list = FALSE)
+train_gbdt_orig <- train_data[gbdt_sample_idx, c(pred_cols, "land_type")]
+
+cat("GBDT Original Training Sample Size:", nrow(train_gbdt_orig), "\n")
+
+gbdt_folds_orig <- createFolds(
+  y = train_gbdt_orig$land_type,
+  k = K_FOLDS,
+  list = TRUE,
+  returnTrain = TRUE
+)
+
+ctrl_gbdt_orig <- trainControl(
+  method = "cv",
+  number = K_FOLDS,
+  index = gbdt_folds_orig,
+  savePredictions = FALSE,
+  classProbs = TRUE,
+  verboseIter = TRUE
+)
+
+# XGBoost tuning grid
+gbdt_grid <- expand.grid(
+  nrounds = c(100, 200),           # Number of boosting iterations
+  max_depth = c(3, 6, 9),          # Tree depth
+  eta = c(0.1, 0.3),               # Learning rate
+  gamma = 0,                        # Minimum loss reduction
+  colsample_bytree = 0.8,          # Subsample ratio of columns
+  min_child_weight = 1,            # Minimum sum of instance weight
+  subsample = 0.8                  # Subsample ratio of training instances
+)
+
+set.seed(0)
+model_gbdt_orig <- train(
+  land_type ~ .,
+  data = train_gbdt_orig,
+  method = "xgbTree",
+  trControl = ctrl_gbdt_orig,
+  tuneGrid = gbdt_grid,
+  metric = "Accuracy",
+  verbosity = 0  # Suppress XGBoost warnings
+)
+
+cat("\nGBDT (Original) Training Complete.\n")
+cat("Best parameters:\n")
+print(model_gbdt_orig$bestTune)
+
+all_results$gbdt_orig <- evaluate_model(
+  model_gbdt_orig, test_data,
+  "GBDT - Original (10% sample)", TRUE, "gbdt_orig"
+)
+
+
+# GBDT (XGBoost) - PCA Features (full data)
+
+cat("\nTraining GBDT - PCA Features (full data)...\n")
+
+train_gbdt_pca <- train_data[, c(pred_cols, "land_type")]
+
+cat("GBDT PCA Training Size:", nrow(train_gbdt_pca), "\n")
+
+gbdt_folds_pca <- createFolds(
+  y = train_gbdt_pca$land_type,
+  k = K_FOLDS,
+  list = TRUE,
+  returnTrain = TRUE
+)
+
+ctrl_gbdt_pca <- trainControl(
+  method = "cv",
+  number = K_FOLDS,
+  index = gbdt_folds_pca,
+  savePredictions = FALSE,
+  classProbs = TRUE,
+  verboseIter = TRUE
+)
+
+# Smaller grid for PCA (fewer features = faster)
+gbdt_grid_pca <- expand.grid(
+  nrounds = c(100, 200, 300),
+  max_depth = c(3, 6, 9),
+  eta = c(0.1, 0.3),
+  gamma = 0,
+  colsample_bytree = 0.8,
+  min_child_weight = 1,
+  subsample = 0.8
+)
+
+set.seed(0)
+model_gbdt_pca <- train(
+  land_type ~ .,
+  data = train_gbdt_pca,
+  method = "xgbTree",
+  preProcess = c("center", "scale", "pca"),
+  preProcOptions = list(pcaComp = 10),
+  trControl = ctrl_gbdt_pca,
+  tuneGrid = gbdt_grid_pca,
+  metric = "Accuracy",
+  verbosity = 0
+)
+
+cat("\nGBDT (PCA) Training Complete.\n")
+cat("Best parameters:\n")
+print(model_gbdt_pca$bestTune)
+
+all_results$gbdt_pca <- evaluate_model(
+  model_gbdt_pca, test_data,
+  "GBDT - PCA", TRUE, "gbdt_pca"
+)
+```
+
+
+```{r RF model training}
+# Random Forest - Original Features (10% sample)
+cat("\nTraining Random Forest - Original Features (10% sample)...\n")
+
+set.seed(0)
+rf_sample_idx <- createDataPartition(
+  train_data$land_type,
+  p = 0.10,
+  list = FALSE
+)
+
+train_rf_orig <- train_data[rf_sample_idx, c(pred_cols, "land_type")]
+
+cat("RF Training Sample Size:", nrow(train_rf_orig), "\n")
+cat("Original Training Size:", nrow(train_data), "\n")
+
+# Create NEW folds for the sampled data
+rf_folds_orig <- createFolds(
+  y = train_rf_orig$land_type,
+  k = K_FOLDS,
+  list = TRUE,
+  returnTrain = TRUE
+)
+
+ctrl_rf_orig <- trainControl(
+  method = "cv",
+  number = K_FOLDS,
+  index = rf_folds_orig,
+  savePredictions = FALSE,
+  classProbs = TRUE,
+  verboseIter = TRUE
+)
+
+set.seed(0)
+model_rf_orig <- train(
+  land_type ~ .,
+  data = train_rf_orig,
+  method = "rf",
+  tuneGrid = expand.grid(mtry = c(10, 15, 20, 30, 50)),
+  trControl = ctrl_rf_orig,
+  ntree = 500,
+  importance = TRUE,
+  metric = "Accuracy"
+)
+
+cat("\nRandom Forest (Original) Training Complete.\n")
+
+all_results$rf_orig <- evaluate_model(
+  model_rf_orig, test_data,
+  "Random Forest - Original (10% sample)", TRUE, "rf_orig"
+)
+
+
+# Random Forest - PCA Features (full data)
+cat("\nTraining Random Forest - PCA Features (full data)...\n")
+
+train_rf_pca <- train_data[, c(pred_cols, "land_type")]
+
+cat("RF PCA Training Size:", nrow(train_rf_pca), "\n")
+
+# Create folds for full data
+rf_folds_pca <- createFolds(
+  y = train_rf_pca$land_type,
+  k = K_FOLDS,
+  list = TRUE,
+  returnTrain = TRUE
+)
+
+ctrl_rf_pca <- trainControl(
+  method = "cv",
+  number = K_FOLDS,
+  index = rf_folds_pca,
+  savePredictions = FALSE,
+  classProbs = TRUE,
+  verboseIter = TRUE
+)
+
+set.seed(0)
+model_rf_pca <- train(
+  land_type ~ .,
+  data = train_rf_pca,
+  method = "rf",
+  preProcess = c("center", "scale", "pca"),
+  preProcOptions = list(pcaComp = 10),
+  tuneGrid = expand.grid(mtry = c(2, 3, 5, 7)),
+  trControl = ctrl_rf_pca,
+  ntree = 500,
+  importance = TRUE,
+  metric = "Accuracy"
+)
+
+cat("\nRandom Forest (PCA) Training Complete.\n")
+
+all_results$rf_pca <- evaluate_model(
+  model_rf_pca, test_data,
+  "Random Forest - PCA", TRUE, "rf_pca"
+)
+```
+
+
+```{r SVM model training}
+# SVM - Original Features (10% sample)
+cat("\nTraining SVM - Original Features (10% sample)...\n")
+set.seed(0)
+svm_sample_idx <- createDataPartition(train_data$land_type, p = 0.10, list = FALSE)
+train_svm_orig <- train_data[svm_sample_idx, c(pred_cols, "land_type")]
+cat("SVM Original Training Sample Size:", nrow(train_svm_orig), "\n")
+svm_folds_orig <- createFolds(
+  y = train_svm_orig$land_type,
+  k = K_FOLDS,
+  list = TRUE,
+  returnTrain = TRUE
+)
+ctrl_svm_orig <- trainControl(
+  method = "cv",
+  number = K_FOLDS,
+  index = svm_folds_orig,
+  savePredictions = FALSE,
+  classProbs = TRUE,
+  verboseIter = TRUE
+)
+model_svm_orig <- train(
+  land_type ~ .,
+  data = train_svm_orig,
+  method = "svmRadial",
+  tuneGrid = expand.grid(C = c(0.1, 1, 10), sigma = c(0.01, 0.1, 1)),
+  trControl = ctrl_svm_orig,
+  metric = "Accuracy"
+)
+cat("\nSVM (Original) Training Complete.\n")
+all_results$svm_orig <- evaluate_model(
+  model_svm_orig, test_data,
+  "SVM - Original (10% sample)", TRUE, "svm_orig"
+)
+# SVM - PCA Features (10% sample)
+cat("\nTraining SVM - PCA Features (10% sample)...\n")
+set.seed(0)
+svm_sample_idx_pca <- createDataPartition(train_data$land_type, p = 0.10, list = FALSE)
+train_svm_pca <- train_data[svm_sample_idx_pca, c(pred_cols, "land_type")]
+cat("SVM PCA Training Sample Size:", nrow(train_svm_pca), "\n")
+svm_folds_pca <- createFolds(
+  y = train_svm_pca$land_type,
+  k = K_FOLDS,
+  list = TRUE,
+  returnTrain = TRUE
+)
+ctrl_svm_pca <- trainControl(
+  method = "cv",
+  number = K_FOLDS,
+  index = svm_folds_pca,
+  savePredictions = FALSE,
+  classProbs = TRUE,
+  verboseIter = TRUE
+)
+model_svm_pca <- train(
+  land_type ~ .,
+  data = train_svm_pca,
+  method = "svmRadial",
+  preProcess = c("center", "scale", "pca"),
+  preProcOptions = list(pcaComp = 10),
+  tuneGrid = expand.grid(C = c(0.1, 1, 10, 100), sigma = c(0.01, 0.1, 1)),
+  trControl = ctrl_svm_pca,
+  metric = "Accuracy"
+)
+cat("\nSVM (PCA) Training Complete.\n")
+all_results$svm_pca <- evaluate_model(
+  model_svm_pca, test_data,
+  "SVM - PCA (10% sample)", TRUE, "svm_pca"
+)
+```
+
+```{r summary table}
+# Build summary table from all_results
+build_summary_table <- function(all_results) {
+  
+  # Define model order and display names
+  models <- list(
+    lda_orig = "LDA (Original)",
+    lda_pca = "LDA (PCA)",
+    log_orig = "Logistic (Original)",
+    log_pca = "Logistic (PCA)",
+    qda_orig = "QDA (Original)",
+    qda_pca = "QDA (PCA)",
+    knn_orig = "$k$-NN (Original)",
+    knn_pca = "$k$-NN (PCA)",
+    gbdt_orig = "xGBoost (Original)",
+    gbdt_pca = "xGBoost (PCA)",
+    rf_orig = "RF (Original)",
+    rf_pca = "RF (PCA)",
+    svm_orig = "SVM (Original)",
+    svm_pca = "SVM (PCA)"
+  )
+  
+  # Extract metrics
+  summary_df <- data.frame(
+    Model = character(),
+    Accuracy = numeric(),
+    Error_Rate = numeric(),
+    Bal_Acc = numeric(),
+    AUC = numeric(),
+    F1 = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (key in names(models)) {
+    if (key %in% names(all_results)) {
+      res <- all_results[[key]]
+      acc <- res$cm$overall["Accuracy"]
+      summary_df <- rbind(summary_df, data.frame(
+        Model = models[[key]],
+        Accuracy = round(acc, 3),
+        Error_Rate = round(1 - acc, 3),
+        Bal_Acc = round(res$avg_bal_acc, 3),
+        AUC = round(res$avg_auc, 3),
+        F1 = round(res$avg_f1, 3),
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  rownames(summary_df) <- NULL
+  return(summary_df)
+}
+
+# Generate LaTeX table with bold for best values
+generate_latex_table <- function(summary_df) {
+  
+  # Find best for each metric (max for most, min for error rate)
+  best_acc <- max(summary_df$Accuracy)
+  best_err <- min(summary_df$Error_Rate)  # Lower is better!
+  best_bal <- max(summary_df$Bal_Acc)
+  best_auc <- max(summary_df$AUC)
+  best_f1 <- max(summary_df$F1)
+  
+  # Format function: bold if best
+  fmt <- function(val, best) {
+    if (val == best) {
+      sprintf("\\textbf{%.3f}", val)
+    } else {
+      sprintf("%.3f", val)
+    }
+  }
+  
+  # Build LaTeX
+  cat("\\begin{table}[htbp]\n")
+  cat("\\centering\n")
+  cat("\\caption{Summary of evaluation results}\n")
+  cat("\\label{tab:all_results}\n")
+  cat("\\begin{tabular}{l|ccccc}\n")
+  cat("\\toprule\n")
+  cat("Model & Accuracy & Error Rate & Bal. Acc & AUC & F1 \\\\\n")
+  cat("\\midrule\n")
+  
+  for (i in 1:nrow(summary_df)) {
+    row <- summary_df[i, ]
+    cat(sprintf("%s & %s & %s & %s & %s & %s \\\\\n",
+                row$Model,
+                fmt(row$Accuracy, best_acc),
+                fmt(row$Error_Rate, best_err),
+                fmt(row$Bal_Acc, best_bal),
+                fmt(row$AUC, best_auc),
+                fmt(row$F1, best_f1)))
+  }
+  
+  cat("\\bottomrule\n")
+  cat("\\end{tabular}\n")
+  cat("\\end{table}\n")
+}
+
+# Run it
+summary_table <- build_summary_table(all_results)
+print(summary_table)
+
+cat("\n\n% === LATEX TABLE (copy below) ===\n\n")
+generate_latex_table(summary_table)
+```
+
+```{r mypredict function}
+
+# Uses existing objects:
+# - pca_prep_knn: preProcess object for PCA transformation
+# - model_knn_pca: trained k-NN model
+
+mypredict <- function(newdata) {
+  
+  # Clean factor levels for caret compatibility
+  newdata$land_type <- as.factor(newdata$land_type)
+  current_levels <- levels(newdata$land_type)
+  temp_levels <- gsub("/", ".", current_levels, fixed = TRUE)
+  temp_levels <- gsub(" ", ".", temp_levels, fixed = TRUE)
+  cleaned_levels <- make.names(temp_levels, unique = TRUE)
+  levels(newdata$land_type) <- cleaned_levels
+  
+  # Get predictor columns
+  pred_cols <- grep("^Band", colnames(newdata), value = TRUE)
+  
+  # Apply same PCA transformation used in training
+  newdata_pca <- predict(pca_prep_knn, newdata[, pred_cols])
+  
+  # Predict using trained k-NN model
+  predictions <- predict(model_knn_pca, newdata_pca)
+  
+  return(predictions)
+}
+
+
+test_predictions <- mypredict(test_data)
+test_accuracy <- mean(test_predictions == test_data$land_type)
+cat(sprintf("Test accuracy: %.4f\n", test_accuracy))
+```
+
+
+# Task 1.3
+
+```{r performance visualisations}
+# Get best model key and clean the name
+best_key <- names(all_results)[which.max(sapply(all_results, function(x) x$cm$overall["Accuracy"]))]
+best_model_name <- summary_table$Model[which.max(summary_table$Accuracy)]
+
+best_model_name_clean <- gsub("\\$", "", best_model_name)  # Remove $ signs
+
+# Per-Class Performance (Best Model) 
+best_ova <- all_results[[best_key]]$ova
+
+ova_long <- best_ova %>%
+  pivot_longer(cols = c(Balanced_Acc, AUC, F1),
+               names_to = "Metric", values_to = "Value")
+
+p1 <- ggplot(ova_long, aes(x = Class, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9), width = 0.8) +
+  geom_text(aes(label = sprintf("%.2f", Value)), 
+            position = position_dodge(width = 0.9),
+            vjust = -0.5, 
+            size = 2.5) +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +  # Add space for labels
+  labs(title = paste("Per-Class Performance:", best_model_name_clean),
+       x = "Land Type", y = "Score") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+print(p1)
+
+#PCA Scatter Plot (First 2 PCs, colored by class)
+
+pca_df <- data.frame(
+  train_knn_pca[, 1:3],  # PC1, PC2, PC3 already computed
+  land_type = train_knn_pca$land_type
+)
+colnames(pca_df)[1:3] <- c("PC1", "PC2", "PC3")
+
+pca_var <- prcomp(train_data[, pred_cols], center = TRUE, scale. = TRUE)
+var_explained <- summary(pca_var)$importance
+
+cat("Variance explained by PC1:", round(var_explained[2, 1] * 100, 1), "%\n")
+cat("Variance explained by PC2:", round(var_explained[2, 2] * 100, 1), "%\n")
+cat("Cumulative (PC1+PC2):", round(var_explained[3, 2] * 100, 1), "%\n")
+cat("Cumulative (PC1-PC10):", round(var_explained[3, 10] * 100, 1), "%\n")
+
+
+
+p2 <- ggplot(pca_df, aes(x = PC1, y = PC2, color = land_type)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(title = "PCA: First Two Principal Components",
+       x = "PC1", y = "PC2", color = "Land Type") +
+  theme_minimal() +
+  theme(legend.position = "right") +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1)))
+
+print(p2)
+```
+
+# Task 1.4
+
+
+In glaciology and climate research, an important task is monitoring glacier extent over time. Using the provided hyperspectral satellite data, frame glacier-ice detection as a binary task with glacier ice = positive and all other land types = negative. Choose and justify an evaluation metric appropriate for this setting (e.g. F1 with glacier as the positive class). Train and evaluate three classifiers of your choice with the goal of improving your chosen performance metric. You may use any classifier or combination of methods covered in the course, including those listed in T1.2, as well as methods like bagging, boosting, and regularisation.
+
+```{r}
+# cleaning data for caret
+dataset$land_type <- as.factor(dataset$land_type)
+
+current_levels <- levels(dataset$land_type)
+
+temp_levels <- gsub("/", ".", current_levels, fixed = TRUE)
+temp_levels <- gsub(" ", ".", temp_levels, fixed = TRUE)
+cleaned_levels <- make.names(temp_levels, unique = TRUE)
+
+levels(dataset$land_type) <- cleaned_levels
+
+# check
+levels(dataset$land_type)
+```
+```{r}
+dataset$glacier <- ifelse(dataset$land_type == "snow...ice", 1, 0)
+
+# Convert to factor
+dataset$glacier <- factor(dataset$glacier, levels = c(0,1))
+table(dataset$land_type, dataset$glacier)
+```
+
+```{r}
+# LDA
+N <- 10  # number of PCs
+set.seed(123)
+
+# Create 5-fold stratified CV based on glacier column
+folds_lda <- createFolds(dataset$glacier, k = 5, list = TRUE, returnTrain = TRUE)
+
+# Initialize vector to store LDA F1 scores
+f1_scores_lda <- numeric(length(folds_lda))
+
+# Loop over folds
+for(i in seq_along(folds_lda)) {
+  
+  # Training and test sets
+  train_idx_lda <- folds_lda[[i]]
+  train_data_lda <- dataset[train_idx_lda, ]
+  test_data_lda  <- dataset[-train_idx_lda, ]
+  
+  # PCA on training fold
+  pca_lda <- prcomp(train_data_lda[, band_cols], center = TRUE, scale. = TRUE)
+  
+  # Top N PCs
+  train_pcs_lda <- as.data.frame(pca_lda$x[, 1:N])
+  test_pcs_lda  <- as.data.frame(predict(pca_lda, newdata = test_data_lda[, band_cols])[, 1:N])
+  
+  # Add target variable
+  train_pcs_lda$glacier_lda <- train_data_lda$glacier
+  test_pcs_lda$glacier_lda  <- test_data_lda$glacier
+  
+
+  # Fit LDA model
+  model_lda <- lda(glacier_lda ~ ., data = train_pcs_lda)
+  
+  # Predict class probabilities
+  pred_prob_lda <- predict(model_lda, newdata = test_pcs_lda)$posterior[, "1"]
+  
+  # Convert to binary predictions
+  pred_lda <- ifelse(pred_prob_lda > 0.5, 1, 0)
+  pred_lda <- factor(pred_lda, levels = c(0,1))
+  true_lda <- factor(test_pcs_lda$glacier_lda, levels = c(0,1))
+  
+  # Compute F1 score
+  f1_scores_lda[i] <- F_meas(pred_lda, true_lda, relevant = "1")
+  
+  cat("Fold", i, "LDA F1:", round(f1_scores_lda[i], 6), "\n")
+}
+
+# Average F1 across folds
+cat("Average LDA F1 across 5 folds:", round(mean(f1_scores_lda), 6), "\n")
+
+```
+Hyperspectral data often violates LDA assumptions because the spectral bands are not perfectly normal and the Covariance of glacier vs non-glacier pixels differs.
+
+Logistic regression doesn’t assume normality, so it just models a linear boundary in feature space and will likely perform better than the LDA model.
+
+```{r}
+# logistic regression
+# Store F1 for each fold
+
+# Identify spectral bands
+# Replace with your actual band column names
+band_cols <- grep("^Band_", names(dataset), value = TRUE)
+
+# Create 5-fold stratified CV
+set.seed(123)
+folds <- createFolds(dataset$glacier, k = 5, list = TRUE, returnTrain = TRUE)
+
+
+# Initialize vector to store F1 scores
+f1_scores <- numeric(length(folds))
+
+# loops over folds
+for(i in seq_along(folds)){
+  
+  # Split training and test sets
+  train_idx <- folds[[i]]
+  train_data <- dataset[train_idx, ]
+  test_data  <- dataset[-train_idx, ]
+  
+
+  # PCA on training set only
+  pca <- prcomp(train_data[, band_cols], center = TRUE, scale. = TRUE)
+  
+  # Project training & test data onto top 10 PCs
+  N <- 10
+  train_pcs <- as.data.frame(pca$x[, 1:N])
+  test_pcs  <- as.data.frame(predict(pca, newdata = test_data[, band_cols])[, 1:N])
+  
+  # Add target variable
+  train_pcs$glacier <- train_data$glacier
+  test_pcs$glacier  <- test_data$glacier
+  
+
+  # Logistic regression
+  model_logit <- glm(glacier ~ ., data = train_pcs, family = binomial)
+  
+  # Predict probabilities on test set
+  prob <- predict(model_logit, newdata = test_pcs, type = "response")
+  
+  # Convert to binary predictions (threshold = 0.5)
+  pred <- ifelse(prob > 0.5, 1, 0)
+  pred <- factor(pred, levels = c(0,1))
+  true <- factor(test_pcs$glacier, levels = c(0,1))
+  
+
+  # Compute F1 score
+  f1_scores[i] <- F_meas(pred, true, relevant = "1")
+  cat("Fold", i, "F1:", round(f1_scores[i], 6), "\n")
+}
+
+
+# Average F1 across folds
+cat("Average F1 across 5 folds:", round(mean(f1_scores), 6), "\n")
+
+
+```
+Logistic regression already is performing really well with an average F1 score of 0.998. 
+
+```{r}
+# random forest
+set.seed(123)
+folds_rf <- createFolds(dataset$glacier, k = 5, list = TRUE, returnTrain = TRUE)
+
+# Select spectral bands (example: Band_1 to Band_218)
+band_cols_rf <- grep("^Band_", names(dataset), value = TRUE)
+
+# Initialize vector to store F1 scores
+f1_scores_rf <- numeric(length(folds_rf))
+
+# Loop over folds
+for(i in seq_along(folds_rf)) {
+  
+  # Training and test sets
+  train_idx_rf <- folds_rf[[i]]
+  train_data_rf <- dataset[train_idx_rf, ]
+  test_data_rf  <- dataset[-train_idx_rf, ]
+
+  # Fit Random Forest
+  rf_model <- randomForest(
+    x = train_data_rf[, band_cols_rf],
+    y = train_data_rf$glacier,
+    ntree = 500,          # number of trees
+    mtry = floor(sqrt(length(band_cols_rf))),  # default: sqrt(num features)
+    importance = TRUE
+  )
+  
+  # Predict on test set
+  pred_rf <- predict(rf_model, newdata = test_data_rf[, band_cols_rf])
+  
+  # Convert to factor with correct levels
+  pred_rf <- factor(pred_rf, levels = c(0,1))
+  true_rf <- factor(test_data_rf$glacier, levels = c(0,1))
+  
+  # Compute F1 score
+  f1_scores_rf[i] <- F_meas(pred_rf, true_rf, relevant = "1")
+  
+  cat("Fold", i, "RF F1:", round(f1_scores_rf[i], 3), "\n")
+}
+
+
+# Average F1 across folds
+cat("Average RF F1 across 5 folds:", round(mean(f1_scores_rf), 3), "\n")
+
+#  Feature importance
+importance(rf_model)
+varImpPlot(rf_model)
+```

@@ -1,0 +1,1327 @@
+---
+title: "Task 2: Code"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+```{r libraries}
+# Data manipulation and visualisation
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+library(gridExtra)
+library(glmnet)
+library(caret)
+library(gridExtra)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+
+# Set seed for reproducibility
+set.seed(1)
+```
+
+# Functions for Later Usage
+
+```{r}
+# FULL METRICS FUNCTION
+calculate_full_metrics <- function(obs, pred_prob, pred_class = ifelse(pred_prob > 0.5, 1, 0)) {
+  obs_factor <- factor(obs, levels = c(0, 1))
+  pred_factor <- factor(pred_class, levels = c(0, 1))
+  TP <- sum(obs_factor == 1 & pred_factor == 1)
+  TN <- sum(obs_factor == 0 & pred_factor == 0)
+  FP <- sum(obs_factor == 0 & pred_factor == 1)
+  FN <- sum(obs_factor == 1 & pred_factor == 0)
+  n <- length(obs)
+  accuracy <- (TP + TN) / n
+  sensitivity <- ifelse(TP + FN > 0, TP / (TP + FN), 0)
+  specificity <- ifelse(TN + FP > 0, TN / (TN + FP), 0)
+  bal_acc <- (sensitivity + specificity) / 2
+  precision <- ifelse(TP + FP > 0, TP / (TP + FP), 0)
+  f1 <- ifelse(precision + sensitivity > 0, 2 * (precision * sensitivity) / (precision + sensitivity), 0)
+  auc_val <- pROC::auc(factor(obs), pred_prob)
+  return(data.frame(Accuracy = accuracy, Bal_Acc = bal_acc, AUC = as.numeric(auc_val), F1 = f1))
+}
+```
+
+```{r}
+# EVAL BAL ACC
+eval_bal_acc <- function(model, test_df) {
+  
+  p <- predict(model, newdata = test_df, type = "response")
+  pred_class <- ifelse(p > 0.5, 1, 0)
+  cm <- confusionMatrix(
+    factor(pred_class, levels = c(0, 1)),
+    factor(test_df$label, levels = c(0, 1)),
+    positive = "1"
+  )
+  
+  return(cm$byClass["Balanced Accuracy"])
+}
+```
+
+```{r}
+calculate_balanced_accuracy <- function(y_true, y_pred) {
+  # Convert to factors with same levels
+  y_true <- factor(y_true, levels = c("0", "1"))
+  y_pred <- factor(y_pred, levels = c("0", "1"))
+  
+  cm <- table(y_true, y_pred)
+  
+  # Calculate sensitivity and specificity
+  sensitivity <- cm[2, 2] / sum(cm[2, ])
+  specificity <- cm[1, 1] / sum(cm[1, ])
+  
+  balanced_acc <- (sensitivity + specificity) / 2
+  return(balanced_acc)
+}
+
+# Function to calculate univariate importance (correlation with outcome)
+calculate_univariate_importance <- function(X, y) {
+  y_numeric <- as.numeric(as.character(y))
+  
+  # Calculate correlation for each feature
+  importances <- apply(X, 2, function(feature) {
+    abs(cor(feature, y_numeric, method = "spearman"))
+  })
+  
+  return(importances)
+}
+```
+
+# Data Import
+
+```{r import-data}
+# Import the compressed CSV file directly
+# Note: This may take a few minutes due to large file size
+cat("Loading data...\n")
+data <- read.csv("data-2.csv.gz")
+```
+
+## Summary Statistics
+
+### Label Distribution
+
+```{r}
+nrow(data); ncol(data)
+```
+
+
+``` {r label-dist}
+ggplot(data, aes(x = factor(label))) + 
+  geom_bar() +
+  labs(x = "Choice", y = "Count", title = "Distribution of Choices") +
+  theme_minimal() +
+  scale_color_viridis_d()
+``` 
+
+### EDA
+
+```{r activity-by-timebin}
+# Extract time bin information from feature names
+# Feature names follow pattern: unit_X_bin_Y where Y is the time bin (0-4)
+
+cat("Analyzing neural activity by time bin...\n\n")
+
+# Get all feature names (excluding label)
+feature_names <- colnames(data)[-1]
+
+# Extract time bin from each feature name
+# Pattern: unit_X_bin_Y -> extract Y
+extract_bin <- function(feature_name) {
+  # Split by underscore and get the last element (bin number)
+  parts <- strsplit(feature_name, "_")[[1]]
+  bin_num <- as.numeric(parts[length(parts)])
+  return(bin_num)
+}
+
+# Create a dataframe with activity by time bin
+bin_activity <- data.frame()
+
+for (bin in 0:4) {
+  # Get features for this time bin
+  bin_features <- feature_names[sapply(feature_names, extract_bin) == bin]
+  
+  cat("Time bin", bin, ": ", length(bin_features), "features (neurons)\n")
+  
+  # Calculate total activity for this bin across all trials
+  bin_data <- data[, bin_features, drop = FALSE]
+  
+  # Summary statistics
+  total_spikes <- sum(bin_data)
+  mean_spikes_per_trial <- mean(rowSums(bin_data))
+  mean_spikes_per_neuron <- mean(colMeans(bin_data))
+  sd_spikes_per_neuron <- sd(colMeans(bin_data))
+  
+  bin_activity <- rbind(
+    bin_activity,
+    data.frame(
+      time_bin = bin,
+      time_window = paste0(bin*100, "-", (bin+1)*100, " ms"),
+      n_neurons = length(bin_features),
+      total_spikes = total_spikes,
+      mean_spikes_per_trial = mean_spikes_per_trial,
+      mean_spikes_per_neuron = mean_spikes_per_neuron,
+      sd_spikes_per_neuron = sd_spikes_per_neuron
+    )
+  )
+}
+
+cat("\nSummary by Time Bin:\n")
+print(bin_activity)
+```
+
+
+```{r plot-activity-by-timebin}
+# Plot 1: Total spikes per time bin
+p1 <- ggplot(bin_activity, aes(x = factor(time_bin), y = total_spikes, fill = factor(time_bin))) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = format(total_spikes, big.mark = ",")), 
+            vjust = -0.5, size = 4) +
+  labs(
+    title = "Total Neural Activity by Time Bin",
+    subtitle = "Sum of all spike counts across all trials and neurons",
+    x = "Time Bin",
+    y = "Total Spike Count"
+  ) +
+  scale_x_discrete(labels = c("0-100ms", "100-200ms", "200-300ms", "300-400ms", "400-500ms")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.35))) +  # Add 15% space at top
+  scale_fill_viridis_d(guide = "none") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Plot 2: Mean spikes per trial by time bin
+p2 <- ggplot(bin_activity, aes(x = factor(time_bin), y = mean_spikes_per_trial, fill = factor(time_bin))) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(mean_spikes_per_trial, 1)), 
+            vjust = -0.5, size = 4) +
+  labs(
+    title = "Average Neural Activity Per Trial by Time Bin",
+    x = "Time Bin",
+    y = "Mean Spikes Per Trial"
+  ) +
+  scale_x_discrete(labels = c("0-100ms", "100-200ms", "200-300ms", "300-400ms", "400-500ms")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.35))) +  # Add 15% space at top
+  scale_fill_viridis_d(guide = "none") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Plot 3: Mean spikes per neuron by time bin (with error bars)
+p3 <- ggplot(bin_activity, aes(x = factor(time_bin), y = mean_spikes_per_neuron, fill = factor(time_bin))) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = mean_spikes_per_neuron - sd_spikes_per_neuron,
+                    ymax = mean_spikes_per_neuron + sd_spikes_per_neuron),
+                width = 0.2) +
+  geom_text(aes(label = round(mean_spikes_per_neuron, 2)), 
+          vjust = -0.5, hjust = 1.2, size = 4) +
+  labs(
+    title = "Average Firing Rate Per Neuron by Time Bin",
+    subtitle = "Error bars show ± 1 SD",
+    x = "Time Bin",
+    y = "Mean Spikes Per Neuron"
+  ) +
+  scale_x_discrete(labels = c("0-100ms", "100-200ms", "200-300ms", "300-400ms", "400-500ms")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.35))) +  # Add 15% space at top
+  scale_fill_viridis_d(guide = "none") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    plot.subtitle = element_text(hjust = 0.5, size = 9),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Display all plots
+print(p1)
+print(p2)
+print(p3)
+
+# Combined plot with better spacing
+png("qm-output/eda-bins.png")
+grid.arrange(p1, p2, p3, ncol = 1, heights = c(1.1, 1, 1.1))
+dev.off()
+```
+
+```{r activity-by-timebin-and-choice}
+# Analyze activity by time bin AND choice (Left vs Right)
+cat("\n\nAnalyzing neural activity by time bin and choice...\n")
+
+bin_choice_activity <- data.frame()
+
+for (bin in 0:4) {
+  bin_features <- feature_names[sapply(feature_names, extract_bin) == bin]
+  bin_data <- data[, bin_features, drop = FALSE]
+  
+  # For each choice
+  for (choice in c(0, 1)) {
+    choice_trials <- data$label == choice
+    choice_bin_data <- bin_data[choice_trials, , drop = FALSE]
+    
+    bin_choice_activity <- rbind(
+      bin_choice_activity,
+      data.frame(
+        time_bin = bin,
+        time_window = paste0(bin*100, "-", (bin+1)*100, " ms"),
+        choice = ifelse(choice == 0, "Left", "Right"),
+        n_trials = sum(choice_trials),
+        mean_spikes_per_trial = mean(rowSums(choice_bin_data))
+      )
+    )
+  }
+}
+
+print(bin_choice_activity)
+```
+
+
+```{r plot-activity-by-timebin-and-choice}
+png("qm-output/eda-LR-comp.png")
+# Plot: Activity by time bin, colored by choice
+ggplot(bin_choice_activity, aes(x = factor(time_bin), y = mean_spikes_per_trial, 
+                                  fill = choice, group = choice)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = round(mean_spikes_per_trial, 1)), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 3) +
+  labs(
+    title = "Neural Activity by Time Bin and Choice",
+    x = "Time Bin",
+    y = "Mean Spikes Per Trial",
+    fill = "Choice"
+  ) +
+  scale_x_discrete(labels = c("0-100ms", "100-200ms", "200-300ms", "300-400ms", "400-500ms")) +
+  scale_fill_manual(values = c("Left" = "forestgreen", "Right" = "skyblue")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+dev.off()
+```
+
+```{r trial-info}
+# Trial-level summaries
+data$trial_total_spikes <- rowSums(data[, -1])
+ggplot(data, aes(x = factor(label), y = trial_total_spikes)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  labs(title = "Total Spike Counts by Choice",
+  x = "Choice",
+  y = "Total Spikes per Trial") +
+  theme_minimal()
+```
+
+```{r feature-summaries}
+# Extract feature names excluding label
+feature_names <- setdiff(names(data), "label")
+
+features <- data.frame(
+  feature = feature_names,
+  mean = sapply(data[feature_names], mean),
+  var = sapply(data[feature_names], var),
+  zeros = sapply(data[feature_names], function(x) sum(x == 0)),
+  nonzeros = sapply(data[feature_names], function(x) sum(x != 0))
+)
+```
+
+```{r prop-zeros}
+# 2. Calculate proportion of zeros (sparsity)
+features$prop_zeros <- features$zeros / (features$zeros + features$nonzeros)
+
+# 3. Identify constant features (zero variance)
+constant_features <- features$feature[features$var == 0]
+length(constant_features)
+```
+
+```{r sparsity-plot}
+# 4. Plot sparsity distribution
+ggplot(features, aes(x = prop_zeros)) + 
+  geom_histogram(bins = 50, fill = "lightblue") + 
+  labs(title = "Distribution of Sparsity (Proportion of Zero Counts) Across Features") +
+  theme_minimal()
+```
+
+```{r}
+data_filtered <- data[, !names(data) %in% constant_features]
+feature_names_filtered <- setdiff(names(data_filtered), "label")
+cat("Features after removing constants:", length(feature_names_filtered), "\n")
+```
+
+```{r data-preparation}
+X <- as.matrix(data[, -1])  # Remove label column
+y <- factor(data$label, levels = c("0", "1"))
+
+# Create train/test split (80/20)
+train_idx <- createDataPartition(y, p = 0.8, list = FALSE)
+X_train <- X[train_idx, ]
+y_train <- y[train_idx]
+X_test <- X[-train_idx, ]
+y_test <- y[-train_idx]
+
+cat("Training set size:", nrow(X_train), "\n")
+cat("Test set size:", nrow(X_test), "\n")
+cat("Number of features:", ncol(X_train), "\n")
+```
+
+# Working Code for Models
+
+### LASSO 
+
+```{r}
+data_filtered <- data[, !names(data) %in% constant_features]
+feature_names_filtered <- setdiff(names(data_filtered), "label")
+```
+
+```{r}
+train_idx  <- createDataPartition(data_filtered$label, p = 0.7, list = FALSE)
+train_data <- data[train_idx, ]
+test_data  <- data[-train_idx, ]
+```
+
+```{r}
+train_folds <- createFolds(train_data$label, k = 5, list = TRUE, returnTrain = TRUE)
+```
+
+```{r}
+cv_lasso <- cv.glmnet(as.matrix(train_data[, feature_names_filtered]),
+  train_data$label,
+  family = "binomial",
+  alpha = 1,
+  nfolds = 5)
+
+coef_lasso <- coef(cv_lasso, s = "lambda.min")
+
+selected_features_lasso <- rownames(coef_lasso)[which(coef_lasso != 0)]
+
+selected_features_lasso <- setdiff(selected_features_lasso, "(Intercept)")
+
+cat("LASSO selected", length(selected_features_lasso), "features\n")
+
+lasso_cv_acc <- numeric(5)
+
+for (i in 1:5) {
+  cv_train_idx <- train_folds[[i]]
+  cv_train <- train_data[cv_train_idx, c("label", selected_features_lasso)]
+  cv_val <- train_data[-cv_train_idx, c("label", selected_features_lasso)]
+  
+  cv_train$label <- as.factor(cv_train$label)
+  lasso_cv_model <- glm(label ~ ., data = cv_train, family = binomial)
+  lasso_cv_acc[i] <- eval_bal_acc(lasso_cv_model, cv_val)
+}
+
+lasso_cv_mean <- mean(lasso_cv_acc)
+lasso_cv_sd <- sd(lasso_cv_acc)
+
+cat("LASSO CV Balanced Accuracy:", round(lasso_cv_mean, 4), "±", round(lasso_cv_sd, 4), "\n")
+
+lasso_train <- train_data[, c("label", selected_features_lasso)]
+lasso_train$label <- as.factor(lasso_train$label)
+lasso_model <- glm(label ~ ., data = lasso_train, family = binomial)
+lasso_test <- test_data[, c("label", selected_features_lasso)]
+lasso_test_acc <- eval_bal_acc(lasso_model, lasso_test)
+
+cat("LASSO Test Balanced Accuracy:", round(lasso_test_acc, 4), "\n")
+```
+
+### RANDOM FOREST
+
+```{r}
+rf_train <- train_data
+rf_train$label <- factor(rf_train$label)
+
+rf_model <- randomForest(label ~ ., data = rf_train,
+                         importance = TRUE,
+                         ntree = 200,
+                         nodesize = 10)
+
+imp_matrix <- importance(rf_model)
+
+imp_col <- if ("MeanDecreaseAccuracy" %in% colnames(imp_matrix)) {
+  "MeanDecreaseAccuracy"
+  } else {
+  "MeanDecreaseGini"
+  }
+
+var_importance <- imp_matrix[, imp_col]
+```
+
+```{r}
+k_values <- 1:50
+rf_cv_results <- data.frame(NumFeatures = integer(), CV_Mean = numeric(), CV_SD = numeric())
+
+for (k in k_values) {
+  top_rf_features_k <- names(sort(var_importance, decreasing = TRUE))[1:k]
+  cv_acc_k <- numeric(5)
+  
+  for (i in 1:5) {
+    cv_train_idx <- train_folds[[i]]
+    cv_train <- train_data[cv_train_idx, c("label", top_rf_features_k)]
+    cv_val <- train_data[-cv_train_idx, c("label", top_rf_features_k)]
+    
+    cv_train$label <- as.factor(cv_train$label)
+    rf_model_k <- glm(label ~ ., data = cv_train, family = binomial)
+    cv_acc_k[i] <- eval_bal_acc(rf_model_k, cv_val)
+  }
+  
+  rf_cv_results <- rbind(rf_cv_results, data.frame(NumFeatures = k,
+                                                   CV_Mean = mean(cv_acc_k),
+                                                   CV_SD = sd(cv_acc_k)))
+  
+}
+
+best_k_rf <- rf_cv_results$NumFeatures[which.max(rf_cv_results$CV_Mean)]
+best_acc_rf_cv <- max(rf_cv_results$CV_Mean)
+cat("RF Best k (CV) =", best_k_rf, "CV accuracy =", round(best_acc_rf_cv, 4), "\n")
+```
+
+```{r}
+# Plot accuracy vs number of features
+ggplot(rf_cv_results, aes(x = NumFeatures, y = CV_Mean)) +
+  geom_line(color = "black") +
+  geom_point(size = 2) +
+  geom_point(data = rf_cv_results[which.max(rf_cv_results$CV_Mean), ],
+  color = "red", size = 4) +
+  labs(title = "Random Forest: Balanced Accuracy vs # Features",
+  x = "Number of Selected Features",
+  y = "5-fold CV Balanced Accuracy") +
+  theme_minimal()
+```
+
+### BORUTA
+
+
+```{r}
+boruta_data <- train_data
+boruta_data$label <- factor(boruta_data$label)
+```
+
+
+```{r}
+cat("Running Boruta (may take several minutes)...\n")
+boruta_result <- Boruta(
+  label ~ .,
+  data = boruta_data,
+  doTrace = 1,
+  maxRuns = 50,
+  pValue = 0.05
+)
+```
+
+
+```{r}
+boruta_features <- getSelectedAttributes(boruta_result, withTentative = FALSE)
+cat("Boruta confirmed", length(boruta_features), "important features\n")
+
+boruta_cv_acc <- numeric(5)
+
+for (i in 1:5) {
+  cv_train_idx <- train_folds[[i]]
+  cv_train <- train_data[cv_train_idx, c("label", boruta_features)]
+  cv_val <- train_data[-cv_train_idx, c("label", boruta_features)]
+  
+  cv_train$label <- as.factor(cv_train$label)
+  boruta_cv_model <- glm(label ~ ., data = cv_train, family = binomial)
+  boruta_cv_acc[i] <- eval_bal_acc(boruta_cv_model, cv_val)
+}
+
+boruta_cv_mean <- mean(boruta_cv_acc)
+boruta_cv_sd <- sd(boruta_cv_acc)
+
+cat("Boruta CV Balanced Accuracy:", round(boruta_cv_mean, 4), "±", round(boruta_cv_sd, 4), "\n")
+
+boruta_train <- train_data[, c("label", boruta_features)]
+boruta_train$label <- as.factor(boruta_train$label)
+boruta_model <- glm(label ~ ., data = boruta_train, family = binomial)
+boruta_test <- test_data[, c("label", boruta_features)]
+boruta_test_acc <- eval_bal_acc(boruta_model, boruta_test)
+cat("Boruta Test Balanced Accuracy:", round(boruta_test_acc, 4), "\n")
+```
+
+```{r}
+boruta_features_tent <- getSelectedAttributes(boruta_result, withTentative = TRUE)
+cat("Boruta confirmed", length(boruta_features_tent), "important features\n")
+
+boruta_tent_cv_acc <- numeric(5)
+
+for (i in 1:5) {
+  cv_train_idx <- train_folds[[i]]
+  cv_train <- train_data[cv_train_idx, c("label", boruta_features_tent)]
+  cv_val <- train_data[-cv_train_idx, c("label", boruta_features_tent)]
+  
+  cv_train$label <- as.factor(cv_train$label)
+  boruta_cv_tent_model <- glm(label ~ ., data = cv_train, family = binomial)
+  boruta_tent_cv_acc[i] <- eval_bal_acc(boruta_cv_tent_model, cv_val)
+}
+
+boruta_cv_tent_mean <- mean(boruta_tent_cv_acc)
+boruta_cv_tent_sd <- sd(boruta_tent_cv_acc)
+
+cat("Boruta CV Balanced Accuracy:", round(boruta_cv_tent_mean, 4), "±", round(boruta_cv_tent_sd, 4), "\n")
+
+boruta_tent_train <- train_data[, c("label", boruta_features_tent)]
+boruta_tent_train$label <- as.factor(boruta_tent_train$label)
+boruta_tent_model <- glm(label ~ ., data = boruta_tent_train, family = binomial)
+boruta_tent_test <- test_data[, c("label", boruta_features_tent)]
+boruta_test_tent_acc <- eval_bal_acc(boruta_tent_model, boruta_tent_test)
+
+cat("Boruta Test Balanced Accuracy:", round(boruta_test_tent_acc, 4), "\n")
+```
+
+### FORWARD STEP
+
+```{r data-preparation}
+X <- as.matrix(data[, -1])  # Remove label column
+y <- factor(data$label, levels = c("0", "1"))
+
+# Create train/test split (80/20)
+train_idx <- createDataPartition(y, p = 0.8, list = FALSE)
+X_train <- X[train_idx, ]
+y_train <- y[train_idx]
+X_test <- X[-train_idx, ]
+y_test <- y[-train_idx]
+
+cat("Training set size:", nrow(X_train), "\n")
+cat("Test set size:", nrow(X_test), "\n")
+cat("Number of features:", ncol(X_train), "\n")
+```
+
+```{r helper-functions}
+# Function to calculate balanced accuracy
+calculate_balanced_accuracy <- function(y_true, y_pred) {
+  # Convert to factors with same levels
+  y_true <- factor(y_true, levels = c("0", "1"))
+  y_pred <- factor(y_pred, levels = c("0", "1"))
+  
+  cm <- table(y_true, y_pred)
+  
+  # Calculate sensitivity and specificity
+  sensitivity <- cm[2, 2] / sum(cm[2, ])
+  specificity <- cm[1, 1] / sum(cm[1, ])
+  
+  balanced_acc <- (sensitivity + specificity) / 2
+  return(balanced_acc)
+}
+
+# Function to calculate univariate importance (correlation with outcome)
+calculate_univariate_importance <- function(X, y) {
+  y_numeric <- as.numeric(as.character(y))
+  
+  # Calculate correlation for each feature
+  importances <- apply(X, 2, function(feature) {
+    abs(cor(feature, y_numeric, method = "spearman"))
+  })
+  
+  return(importances)
+}
+```
+
+```{r univariate-ranking}
+# Calculate importance for each feature
+feature_importance <- calculate_univariate_importance(X_train, y_train)
+
+# Create ranking dataframe
+feature_ranking <- data.frame(feature = colnames(X_train), 
+                              importance = feature_importance) %>% arrange(desc(importance))
+
+# Display top 20 features
+cat("\nTop 20 Features by Univariate Importance:\n")
+print(head(feature_ranking, 20))
+
+png("qm-output/fs-importancedist.png")
+# Plot distribution of importance scores
+ggplot(feature_ranking, aes(x = importance)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black") +
+  labs(
+    title = "Distribution of Univariate Feature Importance",
+    x = "Absolute Spearman Correlation with Label",
+    y = "Count"
+  ) +
+  theme_minimal()
+dev.off()
+```
+
+```{r forward-selection}
+# Define feature subset sizes to evaluate
+feature_counts <- c(1, 2, 5, 10, 15, 25, 50, 75, 100, 125, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000)
+
+# Storage for results
+forward_results <- data.frame()
+
+for (n_features in feature_counts) {
+  cat("\n========================================\n")
+  cat("Testing with", n_features, "features...\n")
+  
+  # Select top n_features based on ranking
+  selected_features <- feature_ranking$feature[1:n_features]
+  
+  # Subset the data
+  X_train_subset <- X_train[, selected_features, drop = FALSE]
+  X_test_subset <- X_test[, selected_features, drop = FALSE]
+  
+  cat("Training data dimensions:", nrow(X_train_subset), "x", ncol(X_train_subset), "\n")
+  
+  # === CROSS-VALIDATION ON TRAINING SET ===
+  n_folds <- 5
+  folds <- createFolds(y_train, k = n_folds, list = TRUE)
+  
+  cv_balanced_acc <- numeric(n_folds)
+  cv_train_acc <- numeric(n_folds)
+  
+  for (fold_i in 1:n_folds) {
+    fold_idx <- folds[[fold_i]]
+    
+    # Split into CV train and validation
+    X_cv_train <- X_train_subset[-fold_idx, , drop = FALSE]
+    y_cv_train <- y_train[-fold_idx]
+    X_cv_val <- X_train_subset[fold_idx, , drop = FALSE]
+    y_cv_val <- y_train[fold_idx]
+    
+    # Create training data
+    cv_train_data <- as.data.frame(X_cv_train)
+    cv_train_data$y <- y_cv_train
+    
+    # Train model on this fold
+    cv_model <- glm(y ~ ., data = cv_train_data, family = "binomial", maxit = 100)
+    
+    # Predictions on validation fold
+    cv_val_data <- data.frame(X_cv_val)
+    cv_pred_prob <- predict(cv_model, newdata = cv_val_data, type = "response")
+    cv_pred_class <- factor(ifelse(cv_pred_prob > 0.5, "1", "0"), levels = c("0", "1"))
+      
+    # Calculate balanced accuracy
+    cv_balanced_acc[fold_i] <- calculate_balanced_accuracy(y_cv_val, cv_pred_class)
+      
+    # Calculate training accuracy on this fold
+    cv_train_pred <- ifelse(cv_model$fitted.values > 0.5, "1", "0")
+    cv_train_acc[fold_i] <- mean(cv_train_pred == as.character(y_cv_train))
+  }
+  
+  # Calculate CV statistics
+  mean_cv_bal_acc <- mean(cv_balanced_acc, na.rm = TRUE)
+  sd_cv_bal_acc <- sd(cv_balanced_acc, na.rm = TRUE)
+  mean_cv_train_acc <- mean(cv_train_acc, na.rm = TRUE)
+  
+  cat("CV Balanced Accuracy: ", round(mean_cv_bal_acc, 4), "\n")
+  
+  # === FINAL MODEL ON FULL TRAINING SET ===
+  train_data <- as.data.frame(X_train_subset)
+  train_data$y <- y_train
+  
+  final_model <- glm(y ~ ., data = train_data, family = "binomial", maxit = 100)
+  
+  if (!is.null(final_model)) {
+    # Make predictions on held-out test set
+    test_data <- data.frame(X_test_subset)
+    pred_prob <- predict(final_model, newdata = test_data, type = "response")
+    pred_class <- factor(ifelse(pred_prob > 0.5, "1", "0"), levels = c("0", "1"))
+    
+    # Calculate balanced accuracy on test set
+    test_bal_acc <- calculate_balanced_accuracy(y_test, pred_class)
+    
+    # Calculate training accuracy
+    train_pred_class <- ifelse(final_model$fitted.values > 0.5, "1", "0")
+    train_acc <- mean(train_pred_class == as.character(y_train))
+    
+    # Store results with both CV and test performance
+    forward_results <- rbind(
+      forward_results,
+      data.frame(
+        n_features = n_features,
+        cv_balanced_accuracy = mean_cv_bal_acc,
+        cv_balanced_accuracy_sd = sd_cv_bal_acc,
+        test_balanced_accuracy = test_bal_acc,
+        train_accuracy = train_acc,
+        train_test_diff = train_acc - mean_cv_bal_acc
+      )
+    )
+    
+    cat("Test Balanced Accuracy:", round(test_bal_acc, 4), "\n")
+    cat("Training Accuracy:", round(train_acc, 4), "\n")
+  } else {
+    cat("Skipping this feature count due to model failure.\n")
+  }}
+
+cat("\n========================================\n")
+cat("FINAL RESULTS:\n")
+print(head(forward_results, 20))
+```
+
+```{r overfitting-analysis}
+
+# Find optimal number of features
+best_idx <- which.max(forward_results$cv_balanced_accuracy)
+best_model <- forward_results[best_idx, ]
+
+cat("\n=== Best Performance ===\n")
+cat("Number of features:", best_model$n_features, "\n")
+cat("Balanced Accuracy:", round(best_model$cv_balanced_accuracy, 4), "\n")
+
+# Check if we have training accuracy data
+forward_results_long <- forward_results %>% 
+  pivot_longer(cols = c(cv_balanced_accuracy, train_accuracy), 
+               names_to = "metric", values_to = "accuracy") %>% 
+  mutate(metric = recode(metric, "train_accuracy" = "Train",
+                         "cv_balanced_accuracy" = "Test (Balanced)"))
+  
+png('qm-output/fs-performance.png')
+ggplot(forward_results_long, aes(x = log(n_features), y = accuracy, color = metric)) +
+    geom_line(size = 1) + geom_point(size = 2) +
+    labs(title = "Forward Selection: Training vs Test Performance",
+         x = "Number of Selected Features (Log Scale)", y = "Balanced Accuracy", color = "Metric") +
+    theme_minimal() +
+    scale_color_manual(values = c("Train" = "coral", "Test (Balanced)" = "steelblue")) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"), legend.position = "bottom")
+dev.off()
+```
+
+
+### ELASTIC NET
+
+
+```{r elastic-net-cv}
+# We'll test multiple alpha values to find the best mixing parameter
+alpha_values <- seq(0.1, 0.9, by = 0.1)  # Range of alpha values to test
+
+#alpha_values <- .3  # Range of alpha values to test
+
+# Storage for results
+elastic_net_results <- list()
+
+# For each alpha, perform cross-validation to find optimal lambda
+for (alpha_val in alpha_values) {
+  cat("\nTesting alpha =", alpha_val, "\n")
+  
+  # Cross-validation to find optimal lambda
+  cv_fit <- cv.glmnet(
+    x = X_train,
+    y = y_train,
+    family = "binomial",
+    alpha = alpha_val,
+    type.measure = "class",  # Classification error
+    nfolds = 5,
+    standardize = TRUE
+  )
+  
+  # Store the CV model
+  elastic_net_results[[paste0("alpha_", alpha_val)]] <- list(
+    cv_fit = cv_fit,
+    alpha = alpha_val,
+    lambda_min = cv_fit$lambda.min,
+    lambda_1se = cv_fit$lambda.1se
+  )
+}
+
+png("qm-output/en-alphaME-lambda.png")
+# Plot CV curves for different alpha values
+par(mfrow = c(3, 3))
+for (result_name in names(elastic_net_results)) {
+  result <- elastic_net_results[[result_name]]
+  plot(result$cv_fit, main = "")
+  title(main = paste("Alpha =", result$alpha), line = 2.5)
+}
+dev.off()
+```
+
+```{r elastic-net-evaluate}
+# Function to calculate balanced accuracy
+calculate_balanced_accuracy <- function(y_true, y_pred) {
+  cm <- table(y_true, y_pred)
+  
+  # Sensitivity (True Positive Rate) for class 1
+  sensitivity <- cm[2, 2] / sum(cm[2, ])
+  # Specificity (True Negative Rate) for class 0
+  specificity <- cm[1, 1] / sum(cm[1, ])
+  
+  balanced_acc <- (sensitivity + specificity) / 2
+  return(balanced_acc)
+}
+
+# Evaluate each alpha on test set
+elastic_net_performance <- data.frame()
+
+for (result_name in names(elastic_net_results)) {
+  result <- elastic_net_results[[result_name]]
+  
+  # Predictions using lambda.min
+  pred_prob <- predict(
+    result$cv_fit,
+    newx = X_test,
+    s = "lambda.min",
+    type = "response"
+  )
+  pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+  
+  # Get number of selected features
+  coef_min <- coef(result$cv_fit, s = "lambda.min")
+  n_features_min <- sum(coef_min[-1] != 0)  # Exclude intercept
+  
+  # Calculate balanced accuracy
+  bal_acc_min <- calculate_balanced_accuracy(y_test, pred_class)
+  
+  # Store results for lambda.min
+  elastic_net_performance <- rbind(
+    elastic_net_performance,
+    data.frame(
+      alpha = result$alpha,
+      lambda_type = "lambda.min",
+      lambda = result$lambda_min,
+      n_features = n_features_min,
+      balanced_accuracy = bal_acc_min
+    )
+  )
+  
+  # Predictions using lambda.1se
+  pred_prob_1se <- predict(
+    result$cv_fit,
+    newx = X_test,
+    s = "lambda.1se",
+    type = "response"
+  )
+  pred_class_1se <- ifelse(pred_prob_1se > 0.5, 1, 0)
+  
+  # Get number of selected features
+  coef_1se <- coef(result$cv_fit, s = "lambda.1se")
+  n_features_1se <- sum(coef_1se[-1] != 0)
+  
+  # Calculate balanced accuracy
+  bal_acc_1se <- calculate_balanced_accuracy(y_test, pred_class_1se)
+  
+  # Store results for lambda.1se
+  elastic_net_performance <- rbind(
+    elastic_net_performance,
+    data.frame(
+      alpha = result$alpha,
+      lambda_type = "lambda.1se",
+      lambda = result$lambda_1se,
+      n_features = n_features_1se,
+      balanced_accuracy = bal_acc_1se
+    )
+  )
+}
+
+print(elastic_net_performance)
+```
+
+```{r elastic-net-visualization}
+png("qm-output/en-ba-vs-features.png")
+# Plot: Balanced Accuracy vs Number of Features for different alpha values
+ggplot(elastic_net_performance, aes(x = n_features, y = balanced_accuracy, 
+                                     color = factor(alpha), 
+                                     shape = lambda_type)) +
+  geom_point(size = 3) +
+  geom_line(aes(group = interaction(alpha, lambda_type))) +
+  labs(
+    title = "Elastic Net: Balanced Accuracy vs Number of Features",
+    x = "Number of Selected Features",
+    y = "Balanced Accuracy",
+    color = "Alpha (L1/L2 mix)",
+    shape = "Lambda Selection"
+  ) + scale_color_viridis_d(option = "turbo") +
+  theme_minimal() +
+  theme(legend.position = "right")
+dev.off()
+```
+
+```{r elastic-net-best-model}
+# Find the best performing model
+best_idx <- which.max(elastic_net_performance$balanced_accuracy)
+best_model_info <- elastic_net_performance[best_idx, ]
+
+cat("\nBest Elastic Net Model:\n")
+cat("Alpha:", best_model_info$alpha, "\n")
+cat("Lambda:", best_model_info$lambda, "\n")
+cat("Number of selected features:", best_model_info$n_features, "\n")
+cat("Balanced Accuracy:", round(best_model_info$balanced_accuracy, 4), "\n")
+
+# Get the best cv.glmnet object
+best_result <- elastic_net_results[[paste0("alpha_", best_model_info$alpha)]]
+
+# Extract and display top features
+best_coef <- coef(
+  best_result$cv_fit,
+  s = ifelse(best_model_info$lambda_type == "lambda.min", 
+             "lambda.min", "lambda.1se")
+)
+best_coef_df <- data.frame(
+  feature = rownames(best_coef),
+  coefficient = as.vector(best_coef)
+) %>%
+  filter(coefficient != 0, feature != "(Intercept)") %>%
+  arrange(desc(abs(coefficient)))
+
+cat("\nTop 20 features by absolute coefficient:\n")
+print(head(best_coef_df, 20))
+```
+
+```{r elastic-net-range}
+# To compare with other methods: evaluate across a range of feature counts
+# We'll use the best alpha and vary lambda to get different numbers of features
+
+best_alpha <- best_model_info$alpha
+best_cv_fit <- elastic_net_results[[paste0("alpha_", best_alpha)]]$cv_fit
+
+# Get coefficients for a range of lambda values
+lambda_range <- exp(seq(log(best_cv_fit$lambda.min), 
+                       log(max(best_cv_fit$lambda)), 
+                       length.out = 20))
+
+elastic_net_range_results <- data.frame()
+
+for (lambda_val in lambda_range) {
+  # Get coefficients
+  coef_val <- coef(best_cv_fit, s = lambda_val)
+  n_features <- sum(coef_val[-1] != 0)
+  
+  if (n_features > 0) {  # Only evaluate if features are selected
+    # Predictions
+    pred_prob <- predict(best_cv_fit, newx = X_test, s = lambda_val, type = "response")
+    pred_class <- factor(ifelse(pred_prob > 0.5, "1", "0"), levels = c("0", "1"))
+    
+    # Balanced accuracy
+    bal_acc <- calculate_balanced_accuracy(y_test, pred_class)
+    
+    elastic_net_range_results <- rbind(
+      elastic_net_range_results,
+      data.frame(
+        lambda = lambda_val,
+        n_features = n_features,
+        balanced_accuracy = bal_acc
+      )
+    )
+  }
+}
+
+# Plot the curve
+ggplot(elastic_net_range_results, aes(x = n_features, y = balanced_accuracy)) +
+  geom_point(size = 2, color = "steelblue") +
+  geom_line(color = "steelblue") +
+  labs(
+    title = paste("Elastic Net Performance Curve (α =", best_alpha, ")"),
+    x = "Number of Selected Features",
+    y = "Balanced Accuracy"
+  ) +
+  theme_minimal()
+
+# Summary table of results at key feature counts
+feature_milestones <- c(10, 20, 50, 100, 200, 500, 1000)
+milestone_results <- elastic_net_range_results %>%
+  mutate(closest_milestone = sapply(n_features, function(x) {
+    milestone <- feature_milestones[which.min(abs(feature_milestones - x))]
+    return(milestone)
+  })) %>%
+  group_by(closest_milestone) %>%
+  filter(abs(n_features - closest_milestone) == min(abs(n_features - closest_milestone))) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(closest_milestone, n_features, balanced_accuracy) %>%
+  rename(`Target Features` = closest_milestone,
+         `Actual Features` = n_features,
+         `Balanced Accuracy` = balanced_accuracy)
+
+cat("\nElastic Net Performance at Key Feature Counts:\n")
+print(milestone_results)
+```
+
+# Final Output (rerun models all on same data)
+
+### Organized Code for All Models
+
+```{r}
+cat("Loading data...\n")
+data <- read.csv("data-2.csv.gz")
+
+feature_names <- setdiff(names(data), "label")
+
+features <- data.frame(feature = feature_names, var = sapply(data[feature_names], var))
+constant_features <- features$feature[features$var == 0]
+data_filtered <- data[, !names(data) %in% constant_features]
+
+train_idx <- createDataPartition(data_filtered$label, p = 0.8, list = FALSE)
+train_data <- data_filtered[train_idx, ]
+test_data <- data_filtered[-train_idx, ]
+
+train_folds <- createFolds(train_data$label, k = 5, list = TRUE, returnTrain = TRUE)
+
+feature_names_filtered <- setdiff(names(data_filtered), "label")
+X_train <- as.matrix(train_data[, feature_names_filtered])
+X_test <- as.matrix(test_data[, feature_names_filtered])
+y_train <- train_data$label
+y_test <- test_data$label
+```
+
+
+```{r}
+# LASSO
+cat("1. LASSO\n")
+lasso_cv <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, nfolds = 5)
+lasso_pred <- predict(lasso_cv, X_test, s = "lambda.min", type = "response")
+lasso_metrics <- calculate_full_metrics(y_test, lasso_pred)
+lasso_nfeat <- sum(coef(lasso_cv, s = "lambda.min")[-1] != 0)
+lasso_results <- data.frame(Method = "LASSO", 
+                            Num_Features = lasso_nfeat,
+                            Accuracy = lasso_metrics$Accuracy,
+                            Bal_Acc = lasso_metrics$Bal_Acc,
+                            AUC = lasso_metrics$AUC,
+                            F1 = lasso_metrics$F1)
+
+# Random Forest Top-k (CV optimized at 10,20,50 features)
+cat("2. RF Top-k\n")
+set.seed(1)
+
+rf_train <- train_data
+rf_train$label <- factor(rf_train$label)
+
+rf_model <- randomForest(label ~ ., data = rf_train,
+                         importance = TRUE,
+                         ntree = 200,
+                         nodesize = 10)
+
+imp_matrix <- importance(rf_model)
+
+imp_col <- if ("MeanDecreaseAccuracy" %in% colnames(imp_matrix)) {
+  "MeanDecreaseAccuracy"
+} else {
+  "MeanDecreaseGini"
+}
+
+var_importance <- imp_matrix[, imp_col]
+
+k_values <- 1:50
+rf_cv_results <- data.frame(NumFeatures = integer(), CV_Mean = numeric(), CV_SD = numeric())
+
+for (k in k_values) {
+  top_rf_features_k <- names(sort(var_importance, decreasing = TRUE))[1:k]
+  cv_acc_k <- numeric(5)
+  
+  for (i in 1:5) {
+    cv_train_idx <- train_folds[[i]]
+    cv_train <- train_data[cv_train_idx, c("label", top_rf_features_k)]
+    cv_val <- train_data[-cv_train_idx, c("label", top_rf_features_k)]
+    
+    cv_train$label <- as.factor(cv_train$label)
+    rf_model_k <- glm(label ~ ., data = cv_train, family = binomial)
+    cv_acc_k[i] <- eval_bal_acc(rf_model_k, cv_val)
+  }
+  
+  rf_cv_results <- rbind(rf_cv_results, data.frame(NumFeatures = k,
+                                                   CV_Mean = mean(cv_acc_k),
+                                                   CV_SD = sd(cv_acc_k)))
+  
+}
+
+best_k_rf <- rf_cv_results$NumFeatures[which.max(rf_cv_results$CV_Mean)]
+best_acc_rf_cv <- max(rf_cv_results$CV_Mean)
+cat("RF Best k (CV) =", best_k_rf, "CV accuracy =", round(best_acc_rf_cv, 4), "\n")
+
+ggplot(rf_cv_results, aes(x = NumFeatures, y = CV_Mean)) +
+  geom_line(color = "black") +
+  geom_point(size = 2) +
+  geom_point(data = rf_cv_results[which.max(rf_cv_results$CV_Mean), ],
+             color = "red", size = 4) +
+  labs(title = "Random Forest: Balanced Accuracy vs # Features",
+       x = "Number of Selected Features",
+       y = "5-fold CV Balanced Accuracy") +
+  theme_minimal()
+
+best_k_rf <- rf_cv_results$NumFeatures[which.max(rf_cv_results$CV_Mean)]
+best_acc_rf_cv <- max(rf_cv_results$CV_Mean)
+cat("RF Best k (CV) =", best_k_rf, "CV accuracy =", round(best_acc_rf_cv, 4), "\n")
+
+top_features <- names(sort(var_importance, decreasing = TRUE))[1:best_k_rf]
+rf_train_best <- train_data[, c("label", top_features)]
+rf_model_best <- glm(label ~ ., data = rf_train_best, family = binomial)
+rf_pred <- predict(rf_model_best, test_data[, c("label", top_features)], type = "response")
+best_metrics_rf <- calculate_full_metrics(test_data$label, rf_pred)
+
+rf_results <- data.frame(Method = "RF Top-k", 
+                         Num_Features = best_k_rf,
+                         Accuracy = best_metrics_rf$Accuracy,
+                         Bal_Acc = best_metrics_rf$Bal_Acc,
+                         AUC = best_metrics_rf$AUC,
+                         F1 = best_metrics_rf$F1)
+
+# Forward Stepwise (Univariate ranking)
+cat("3. Forward Stepwise\n")
+feature_importance <- apply(X_train, 2, function(x) abs(cor(x, as.numeric(y_train), method = "spearman")))
+feature_ranking <- order(feature_importance, decreasing = TRUE)
+feature_counts <- c(1, 2, 5, 10, 15, 25, 50, 75, 100, 125, 150, 200, 300)
+best_k_fs <- 10; best_metrics_fs <- NULL
+for (k in feature_counts) {
+  selected_idx <- feature_ranking[1:k]
+  X_train_sub <- X_train[, selected_idx, drop = FALSE]
+  X_test_sub <- X_test[, selected_idx, drop = FALSE]
+  cv_bal_acc <- numeric(5)
+  for (i in 1:5) {
+    cv_train_idx <- train_folds[[i]]
+    cv_train_X <- X_train_sub[cv_train_idx, , drop = FALSE]
+    cv_train_df <- data.frame(y = y_train[cv_train_idx], as.data.frame(cv_train_X))
+    cv_val_X <- X_train_sub[-cv_train_idx, , drop = FALSE]
+    cv_model <- glm(y ~ ., data = cv_train_df, family = binomial, maxit = 100)
+    cv_pred <- predict(cv_model, data.frame(as.data.frame(cv_val_X)), type = "response")
+    cv_bal_acc[i] <- calculate_full_metrics(y_train[-cv_train_idx], cv_pred)$Bal_Acc
+  }
+  if (mean(cv_bal_acc) > (ifelse(is.null(best_metrics_fs), 0, best_metrics_fs$Bal_Acc))) {
+    best_k_fs <- k
+    train_df <- data.frame(y = y_train, as.data.frame(X_train_sub))
+    fs_model <- glm(y ~ ., data = train_df, family = binomial, maxit = 100)
+    fs_pred <- predict(fs_model, data.frame(as.data.frame(X_test_sub)), type = "response")
+    best_metrics_fs <- calculate_full_metrics(y_test, fs_pred)
+  }
+}
+stepwise_results <- data.frame(Method = "Forward Stepwise", 
+                               Num_Features = best_k_fs,
+                               Accuracy = best_metrics_fs$Accuracy,
+                               Bal_Acc = best_metrics_fs$Bal_Acc,
+                               AUC = best_metrics_fs$AUC,
+                               F1 = best_metrics_fs$F1)
+
+
+# Elastic Net (Best alpha)
+cat("4. Elastic Net\n")
+alpha_values <- c(0.1, 0.3, 0.5, 0.7, 0.9)
+best_alpha_en <- 0.1; best_metrics_en <- NULL; best_nfeat_en <- 0
+for (alpha in alpha_values) {
+  en_cv <- cv.glmnet(X_train, y_train, family = "binomial", alpha = alpha, nfolds = 5)
+  en_pred <- predict(en_cv, X_test, s = "lambda.min", type = "response")
+  en_metrics <- calculate_full_metrics(y_test, en_pred)
+  if (en_metrics$Bal_Acc > (ifelse(is.null(best_metrics_en), 0, best_metrics_en$Bal_Acc))) {
+    best_alpha_en <- alpha
+    best_metrics_en <- en_metrics
+    best_nfeat_en <- sum(coef(en_cv, s = "lambda.min")[-1] != 0)
+  }
+}
+en_results <- data.frame(Method = "Elastic Net", 
+                         Num_Features = best_nfeat_en,
+                         Accuracy = best_metrics_en$Accuracy,
+                         Bal_Acc = best_metrics_en$Bal_Acc,
+                         AUC = best_metrics_en$AUC,
+                         F1 = best_metrics_en$F1)
+
+# Boruta
+cat("5. Boruta\n")
+boruta_data <- train_data[, c("label", feature_names_filtered)]
+boruta_data$label <- factor(boruta_data$label)
+boruta_result <- Boruta(label ~ ., data = boruta_data, doTrace = 0, maxRuns = 50, pValue = 0.05)
+boruta_features <- getSelectedAttributes(boruta_result)
+boruta_train <- train_data[, c("label", boruta_features)]
+boruta_model <- glm(label ~ ., data = boruta_train, family = binomial)
+boruta_test <- test_data[, c("label", boruta_features)]
+boruta_pred <- predict(boruta_model, newdata = boruta_test, type = "response")
+boruta_metrics <- calculate_full_metrics(boruta_test$label, boruta_pred)
+boruta_results <- data.frame(Method = "Boruta", 
+                             Num_Features = length(boruta_features),
+                             Accuracy = boruta_metrics$Accuracy,
+                             Bal_Acc = boruta_metrics$Bal_Acc,
+                             AUC = boruta_metrics$AUC,
+                             F1 = boruta_metrics$F1)
+
+cat("6. Boruta (with tent) \n")
+boruta_tent_features <- getSelectedAttributes(boruta_result, withTentative = TRUE)
+boruta_tent_train <- train_data[, c("label", boruta_tent_features)]
+boruta_tent_model <- glm(label ~ ., data = boruta_tent_train, family = binomial)
+boruta_tent_test <- test_data[, c("label", boruta_tent_features)]
+boruta_tent_pred <- predict(boruta_tent_model, newdata = boruta_tent_test, type = "response")
+boruta_tent_metrics <- calculate_full_metrics(boruta_tent_test$label, boruta_tent_pred)
+boruta_tent_results <- data.frame(Method = "Boruta (with Tentative)", 
+                                  Num_Features = length(boruta_tent_features),
+                                  Accuracy = boruta_tent_metrics$Accuracy,
+                                  Bal_Acc = boruta_tent_metrics$Bal_Acc,
+                                  AUC = boruta_tent_metrics$AUC,
+                                  F1 = boruta_tent_metrics$F1)
+
+# Boruta  Summary
+boruta_stats <- data.frame(
+  Category = c("Confirmed", "Tentative", "Rejected"),
+  Count = c(sum(boruta_result$finalDecision == "Confirmed"),
+            sum(boruta_result$finalDecision == "Tentative"), 
+            sum(boruta_result$finalDecision == "Rejected"))
+)
+
+knitr::kable(boruta_stats)
+
+ggplot(boruta_stats, aes(x = Category, y = Count, fill = Category)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = Count), vjust = -0.3) +
+  scale_fill_viridis_d() +
+  labs(title = "Boruta Feature Categories", x = "Decision", y = "Number of Features") +
+  theme_minimal()
+```
+
+
+### Final Table
+
+
+```{r}
+
+
+# =============================================================================
+# COMBINE ALL RESULTS 
+# =============================================================================
+
+# List your results data.frames (they already have Method column):
+all_model_results <- list(
+  lasso_results,
+  rf_results, 
+  stepwise_results,
+  en_results,
+  boruta_results,
+  boruta_tent_results  # Includes tentative
+)
+
+# Combine them all
+combined_results <- bind_rows(all_model_results)
+
+# Round numeric columns
+combined_results[, c("Num_Features", "Accuracy", "Bal_Acc", "AUC", "F1")] <- 
+  round(combined_results[, c("Num_Features", "Accuracy", "Bal_Acc", "AUC", "F1")], 4)
+```
+
+
+```{r}
+# Bolding the max values
+knitr::kable(combined_results, 
+      digits = 4,
+      caption = "Task 2: Feature Selection Results")
+
+
+
+bold_markdown <- combined_results |>
+  mutate(
+    Accuracy = ifelse(Accuracy == max(Accuracy), paste0("**", Accuracy, "**"), Accuracy),
+    Bal_Acc = ifelse(Bal_Acc == max(Bal_Acc), paste0("**", Bal_Acc, "**"), Bal_Acc),
+    AUC = ifelse(AUC == max(AUC), paste0("**", AUC, "**"), AUC),
+    F1 = ifelse(F1 == max(F1), paste0("**", F1, "**"), F1)
+  )
+
+knitr::kable(bold_markdown, 
+             digits = 4,
+             col.names = c("Method", "Num Features", "Accuracy", "Bal. Acc", "AUC", "F1"),
+             format = "markdown")
+
+
+ggplot(combined_results, aes(x = Num_Features, y = Bal_Acc, color = Method)) +
+  geom_point(size = 4, alpha = 0.8) +
+  geom_label_repel(aes(label = sprintf("%.3f", Bal_Acc))) +
+  scale_x_log10(labels = scales::comma) +
+  labs(title = "Balanced Accuracy vs Number of Selected Features",
+       subtitle = "Log scale - Test set performance",
+       x = "Number of Features", y = "Balanced Accuracy") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
