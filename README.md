@@ -24,8 +24,7 @@ to the eight vegetation classes. Due to the large file size, it is recommended t
 compressed file directly into R or Python, for example, by using the command
 read.csv("data-1.csv.gz"). Given the computational load imposed by the large dataset,
 you may have to train your model on a subset of the data or adopt an alternative approach,
-including methods not covered in the course.
-1The raw satellite data can be accessed at: https://www.enmap.org/data_tools/exampledata/
+including methods not covered in the course. The raw satellite data can be accessed at: https://www.enmap.org/data_tools/exampledata/
 ### 1.2 Task
 This task consists of the following sub-tasks:
 - T1.1 Explore the data to generate summary statistics and plots that help the reader understand the data, with a focus on information relevant to the classification task.
@@ -70,7 +69,7 @@ the pattern unit i bin t, where i is the neuron index and t is the time bin inde
 were accessed through the IBL’s ONE API (Alyx team and International Brain Laboratory,
 2020). Due to the large feature dimensionality, it is recommended to read the compressed file
 directly into R or Python, for example, by using the command read.csv("data-2.csv.gz").
-##2.2 Task
+## 2.2 Task
 This task consists of the following sub-tasks:
 - T2.1 Explore the data to generate summary statistics and plots that help the reader understand the data, with a focus on information relevant to the classification task.
 - T2.2 Train and evaluate feature selection methods with the goal of achieving high balanced
@@ -83,4 +82,4 @@ an explanation of each new method.
 - For T2.2 and T2.3, your evaluation results should include the balanced accuracy
 and the number of selected features achieved by each method for various numbers of
 selected features. You may also compare the balanced accuracy achieved by different
-methods for a similar number of selected features. S
+methods for a similar number of selected features. 
